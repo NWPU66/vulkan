@@ -24,6 +24,12 @@ target_link_libraries(hello_triangle PRIVATE
 #     COMMAND ${CMAKE_COMMAND} -E copy
 #     "${Open3D_ROOT}/../bin/Open3D.dll"
 #     $<TARGET_FILE_DIR:hello_triangle>)
+
+# 移动./shader整个目录到编译目录下
+add_custom_command(TARGET hello_triangle POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/shader"
+    $<TARGET_FILE_DIR:hello_triangle>/shader)
 install(TARGETS hello_triangle 
     RUNTIME DESTINATION ./demo
     LIBRARY DESTINATION ./demo

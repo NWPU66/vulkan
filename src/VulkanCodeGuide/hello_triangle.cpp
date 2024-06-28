@@ -1,16 +1,16 @@
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 
 #include <algorithm>
+#include <array>
+#include <fstream>
 #include <functional>  //functional头文件用于资源管理
 #include <iostream>
 #include <memory>
 #include <set>
 #include <stdexcept>  //报错
 #include <string>
-#include <type_traits>
 #include <vector>
 
 #define GLFW_INCLUDE_VULKAN
@@ -20,15 +20,32 @@
 #include <vulkan/vulkan_core.h>
 
 // constants
-static const uint32_t                 screen_width     = 1920;
-static const uint32_t                 screen_height    = 1080;
-static const std::vector<const char*> validationLayers = {"VK_LAYER_KHRONOS_validation"};
-static const std::vector<const char*> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+static const uint32_t    screen_width         = 800;
+static const uint32_t    screen_height        = 600;
+static const std::string shader_root          = "./shader/";
+static const int32_t     MAX_FRAMES_IN_FLIGHT = 2;
 #ifdef NDEBUG
-const bool enableValidationLayers = false;
+static const bool enableValidationLayers = false;
 #else
-const bool enableValidationLayers = true;
+static const bool enableValidationLayers = true;
 #endif
+static const std::vector<const char*> validationLayers                  = {"VK_LAYER_KHRONOS_validation"};
+static const std::vector<const char*> deviceExtensions                  = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+static const bool                     print_avalibale_vulkan_extensions = false;
+
+static std::shared_ptr<std::vector<char>> readFile(const std::string& filename)
+{
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    // 使用ate模式，从文件尾部开始读取可以根据读取位置确定文件的大小，分配足够的数组空间
+    if (!file.is_open()) { throw std::runtime_error("failed to open file!"); }
+
+    size_t                             fileSize = static_cast<size_t>(file.tellg());
+    std::shared_ptr<std::vector<char>> buffer(new std::vector<char>(fileSize));
+    file.seekg(0);
+    file.read(buffer->data(), fileSize);
+    file.close();
+    return buffer;
+}
 
 class HelloTriangleApplication {
 public:
@@ -54,19 +71,43 @@ private:
 
     struct SwapChainSupportDetails
     {
-        VkSurfaceCapabilitiesKHR        capabilities;
+        VkSurfaceCapabilitiesKHR        capabilities{};
         std::vector<VkSurfaceFormatKHR> formats;
         std::vector<VkPresentModeKHR>   presentModes;
     };
 
+    // create instance
     GLFWwindow*              window;
     VkInstance               instance;
     VkDebugUtilsMessengerEXT callback;
-    VkPhysicalDevice         physicalDevice = VK_NULL_HANDLE;  // vkinstance清除时自动清除
-    VkSurfaceKHR             surface;
-    VkDevice                 device;
-    VkQueue                  graphicsQueue;  // 逻辑设备的队列会在逻辑设备清除时自动被清除
-    VkQueue                  presentQueue;
+
+    // create logical device
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;  // vkinstance清除时自动清除
+    VkSurfaceKHR     surface;
+    VkDevice         device;
+    VkQueue          graphicsQueue;  // 逻辑设备的队列会在逻辑设备清除时自动被清除
+    VkQueue          presentQueue;
+
+    // create swap chain
+    VkSwapchainKHR           swapChain;
+    std::vector<VkImage>     swapChainImages;  // 图像由交换链负责创建，并在交换链清除时自动清除
+    VkFormat                 swapChainImageFormat;
+    VkExtent2D               swapChainExtent;
+    std::vector<VkImageView> swapChainImageViews;
+
+    // create render pipline
+    VkRenderPass                 renderPass;
+    VkPipelineLayout             pipelineLayout;
+    VkPipeline                   graphicsPipeline;
+    std::vector<VkFramebuffer>   swapChainFramebuffers;
+    VkCommandPool                commandPool;
+    std::vector<VkCommandBuffer> commandBuffers;
+
+    // render and present
+    std::vector<VkSemaphore> imageAvailableSemaphores;  // 为每一帧创建信号量
+    std::vector<VkSemaphore> renderFinishedSemaphores;
+    std::vector<VkFence> inFlightFences;  // CPU和GPU的同步，防止有超过最大并行数帧的指令同时被提交执行
+    size_t currentFrame = 0;              // 当前帧应该使用的信号量
 
     void initWindow()
     {
@@ -80,10 +121,21 @@ private:
     {
         createInstance();
         setupDebugCallback();
+
         createSurface();
         pickPhysicalDevice();
         createLogicalDevice();
+
         createSwapChain();
+        createImageViews();
+
+        createRenderPass();
+        createGraphicsPipeline();
+        createFramebuffers();
+        createCommandPool();
+        createCommandBuffers();
+
+        createSemaphores();
     }
 
     void mainLoop()
@@ -91,12 +143,44 @@ private:
         while (glfwWindowShouldClose(window) == 0)
         {
             glfwPollEvents();
+            drawFrame();
         }
+
+        vkDeviceWaitIdle(device);
+        /*
+        drawFrame函数中的操作是异步执行的。这意味着我们关闭应用程序窗口跳出主循环时，
+        绘制操作和呈现操作可能仍在继续执行，这与我们紧接着进行的清除操作也是冲突的。
+
+        我们应该等待逻辑设备的操作结束执行才能销毁窗口，
+        我们可以使用vkQueueWaitIdle函数等待一个特定指令队列结束执行。
+        */
     }
 
     void cleanup()
     {
-        // cleanup Vulkan
+        // ANCHOR -  cleanup Vulkan
+        // 清除所有信号量
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
+        }
+        vkDestroyCommandPool(device, commandPool, nullptr);
+        // 清除帧缓冲对象
+        for (auto* framebuffer : swapChainFramebuffers)
+        {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyRenderPass(device, renderPass, nullptr);
+        // 清除图像视图
+        for (auto* imageView : swapChainImageViews)
+        {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
         vkDestroyDevice(device, nullptr);
         if (enableValidationLayers)  // 清除VK校验层
         {
@@ -111,7 +195,7 @@ private:
         vkDestroySurfaceKHR(instance, surface, nullptr);  // GLFW并没有提供清除表面的函数
         vkDestroyInstance(instance, nullptr);             // 清除VK实例
 
-        // cleanup GLFW
+        // ANCHOR -  cleanup GLFW
         glfwDestroyWindow(window);
         window = nullptr;
         glfwTerminate();
@@ -138,6 +222,7 @@ private:
         }
 
         // 打印Vulkan扩展的信息
+        if (print_avalibale_vulkan_extensions)
         {
             uint32_t extensionCount = 0;
             vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
@@ -338,7 +423,7 @@ private:
         {
             if (queueFamily.queueCount > 0 && ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0))
             {
-                indices.graphicsFamily = i;
+                indices.graphicsFamily = i;     
             }
 
             // 检查物理设备是否具有呈现能力
@@ -361,19 +446,24 @@ private:
         QueueFamilyIndices                   indices             = findQueueFamilies(physicalDevice);
         std::set<int32_t>                    uniqueQueueFamilies = {indices.graphicsFamily, indices.presentFamily};
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos(uniqueQueueFamilies.size());
+        /**FIXME - 错题本
+        std::vector<> _vector(count);
+        构造函数会分配count个空间，并填充count个默认构造的元素进去
+        */
 
-        float queuePriority = 1.0F;
+        float   queuePriority = 1.0F;
+        int32_t i             = 0;
         for (int32_t queueFamily : uniqueQueueFamilies)
         {
             // Vulkan需要我们赋予队列一个0.0到1.0之间的浮点数作为优先级来控制指令缓冲的执行顺序。
-            queueCreateInfos.push_back(VkDeviceQueueCreateInfo{
+            queueCreateInfos[i++] = VkDeviceQueueCreateInfo{
                 VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,  //
                 nullptr,                                     //
                 0,                                           //
                 static_cast<uint32_t>(queueFamily),          //
                 1,                                           //
                 &queuePriority                               //
-            });
+            };
         }
 
         // 指定应用程序使用的设备特性
@@ -389,7 +479,7 @@ private:
             (enableValidationLayers) ? validationLayers.data() : nullptr,                   //
             static_cast<uint32_t>(deviceExtensions.size()),                                 //
             deviceExtensions.data(),                                                        //
-            &deviceFeatures                                                                 //
+            &deviceFeatures,                                                                //
         };
         /*
         VK_KHR_swapchain就是一个设备特定扩展的例子，这一扩展使得我们可以将
@@ -530,7 +620,7 @@ private:
         return bestMode;
     }
 
-    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
+    static VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
     {
         // 交换范围是交换链中图像的分辨率，它几乎总是和我们要显示图像的窗口的分辨率相同。
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
@@ -584,33 +674,844 @@ private:
         QueueFamilyIndices      indices            = findQueueFamilies(physicalDevice);
         std::array<uint32_t, 2> queueFamilyIndices = {static_cast<uint32_t>(indices.graphicsFamily),
                                                       static_cast<uint32_t>(indices.presentFamily)};
+        const bool              uniqueFamily       = (indices.graphicsFamily == indices.presentFamily);
 
         VkSwapchainCreateInfoKHR createInfo{
-            .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-            .surface          = surface,
-            .minImageCount    = imageCount,
-            .imageFormat      = surfaceFormat.format,
-            .imageColorSpace  = surfaceFormat.colorSpace,
-            .imageExtent      = extent,
-            .imageArrayLayers = 1,
-            .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .preTransform     = swapChainSupport->capabilities.currentTransform,
-            .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            .presentMode      = presentMode,
-            .clipped          = VK_TRUE,
-            .oldSwapchain     = VK_NULL_HANDLE,
+            .sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .surface               = surface,
+            .minImageCount         = imageCount,
+            .imageFormat           = surfaceFormat.format,
+            .imageColorSpace       = surfaceFormat.colorSpace,
+            .imageExtent           = extent,
+            .imageArrayLayers      = 1,  // 每个图像所包含的层次，VR相应用程序会有更多的层次
+            .imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageSharingMode      = (uniqueFamily) ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT,
+            .queueFamilyIndexCount = (uniqueFamily) ? 0U : 2U,
+            .pQueueFamilyIndices   = (uniqueFamily) ? nullptr : queueFamilyIndices.data(),
+            .preTransform          = swapChainSupport->capabilities.currentTransform,
+            .compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,  // 忽略alpha通道
+            .presentMode           = presentMode,
+            .clipped               = VK_TRUE,  // 不关心被窗口系统中的其它窗口遮挡的像素的颜色
+            .oldSwapchain          = VK_NULL_HANDLE,  // 改变窗口大小后交换链需要重建
         };
         /**NOTE - VkSwapchainCreateInfoKHR
-        imageArrayLayers成员变量用于指定每个图像所包含的层次。
-        通常，来说它的值为1。但对于VR相关的应用程序来说，会使用更多的层次。
-
         imageUsage成员变量用于指定我们将在图像上进行怎样的操作。
         在本教程，我们在图像上进行绘制操作，也就是将图像作为一个颜色附着来使用。
         如果读者需要对图像进行后期处理之类的操作，可以使用VK_IMAGE_USAGE_
         TRANSFER_DST_BIT作为imageUsage成员变量的值，让交换链图像可以作为传输的目的图像。
+
+        我们通过图形队列在交换链图像上进行绘制操作，然后将图像提交给呈现队列来显示。
+        有两种控制在多个队列访问图像的方式：
+            VK_SHARING_MODE_EXCLUSIVE：
+            一张图像同一时间只能被一个队列族所拥有，在另一队列族使用它之前，
+            必须显式地改变图像所有权。这一模式下性能表现最佳。
+            VK_SHARING_MODE_CONCURRENT：
+            图像可以在多个队列族间使用，不需要显式地改变图像所有权。
+
+        如果图形和呈现不是同一个队列族，我们使用协同模式来避免处理图像所有权问题。
+        协同模式需要我们使用queueFamilyIndexCount和pQueueFamilyIndices来指定
+        共享所有权的队列族。如果图形队列族和呈现队列族是同一个队列族(大部分情况下都是这样)，
+        我们就不能使用协同模式，协同模式需要我们指定至少两个不同的队列族。
         */
+
+        // ANCHOR - 创建交换链
+        if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create swap chain!";
+            throw std::runtime_error("failed to create swap chain!");
+        }
+
+        // 获取交换链图像
+        // Vulkan的具体实现可能会创建比imageCount最小交换链图像数量更多的交换链图像
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
+        swapChainImages.resize(imageCount);
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
+        // 设置的交换链图像格式和范围
+        swapChainImageFormat = surfaceFormat.format;
+        swapChainExtent      = extent;
     }
+
+    void createImageViews()
+    {
+        /* 图像视图
+        使用任何VkImage对象，包括处于交换链中的，处于渲染管线中的，都需要我们创建一个
+        VkImageView对象来绑定访问它。图像视图描述了访问图像的方式，以及图像的哪一部分
+        可以被访问。比如，图像可以被图像视图描述为一个没有细化级别的二维深度纹理，进而
+        可以在其上进行与二维深度纹理相关的操作。
+        */
+        swapChainImageViews.resize(swapChainImages.size());
+        for (size_t i = 0; i < swapChainImages.size(); i++)
+        {
+            VkImageViewCreateInfo createInfo{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .image = swapChainImages[i],
+                .viewType = VK_IMAGE_VIEW_TYPE_2D,  // 指定图像被看作一维、二维、三维纹理还是立方体贴图
+                .format     = swapChainImageFormat,
+                .components = VkComponentMapping{.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                 .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                 .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                 .a = VK_COMPONENT_SWIZZLE_IDENTITY},
+                .subresourceRange =
+                    VkImageSubresourceRange{
+                        .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .baseMipLevel   = 0,
+                        .levelCount     = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount     = 1,
+                    },
+            };
+            /*
+            components成员变量用于进行图像颜色通道的映射。
+            比如，对于单色纹理，我们可以将所有颜色通道映射到红色通道。
+            我们也可以直接将颜色通道的值映射为常数0或1。在这里，我们只使用默认的映射
+
+            subresourceRange成员变量用于指定图像的用途和图像的哪一部分可以被访问。
+            在这里，我们的图像被用作渲染目标，并且没有细分级别，只存在一个图层
+
+            如果读者在编写VR一类的应用程序，可能会使用支持多个层次的交换链。
+            这时，读者应该为每个图像创建多个图像视图，分别用来访问左眼和右眼两个不同的图层
+            */
+
+            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS)
+            {
+                LOG(ERROR) << "failed to create image views!";
+                throw std::runtime_error("failed to create image views!");
+            }
+        }
+    }
+
+    VkShaderModule createShaderModule(const std::shared_ptr<std::vector<char>>& code)
+    {
+        /*
+        但需要注意一点，我们需要先将存储字节码的数组指针转换为const uint32_t*变量类型，
+        来匹配结构体中的字节码指针的变量类型。
+
+        此外，我们指定的指针指向的地址应该符合uint32_t变量类型的内存对齐
+        方式。我们这里使用的std::vector，它的默认分配器分配的内存的地址符合这一要求。
+        */
+        VkShaderModuleCreateInfo createInfo{
+            .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext    = nullptr,
+            .flags    = 0,
+            .codeSize = code->size(),
+            .pCode    = reinterpret_cast<const uint32_t*>(code->data()),
+        };
+        VkShaderModule shaderModule = nullptr;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create shader module!";
+            throw std::runtime_error("failed to create shader module!");
+        }
+        return shaderModule;
+    }
+
+    void createRenderPass()
+    {
+        /**NOTE - 定义渲染流程
+        在进行管线创建之前，我们还需要设置用于渲染的帧缓冲附着。
+        我们需要指定使用的颜色和深度缓冲，以及采样数，渲染操作如何处理缓冲的内容。
+        所有这些信息被Vulkan包装为一个渲染流程对象。
+         */
+        VkAttachmentDescription colorAttachment{
+            .flags         = 0,
+            .format        = swapChainImageFormat,
+            .samples       = VK_SAMPLE_COUNT_1_BIT,  // 我们没有使用多重采样，所以将采样数设置为1
+            .loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR,   // 指定在渲染之前对附着中的数据进行的操作
+            .storeOp       = VK_ATTACHMENT_STORE_OP_STORE,  // 指定在渲染之后对附着中的数据进行的操作
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,        // 指定渲染流程开始前的图像布局方式
+            .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,  // 指定渲染流程结束后的图像布局方式
+        };  // finalLayout设置为VK_IMAGE_LAYOUT_PRESENT_SRC_KHR，使渲染后的图像可以被交换链呈现。
+
+        /* 子流程和附着引用
+        一个渲染流程可以包含多个子流程。子流程依赖于上一流程处理后的帧缓冲内容。
+        比如，许多叠加的后期处理效果就是在上一次的处理结果上进行的。
+        我们将多个子流程组成一个渲染流程后，Vulkan可以对其进行一定程度的优化。
+
+        每个子流程可以引用一个或多个附着，这些引用的附着是通过VkAttachmentReference结构体指定的
+        */
+        VkAttachmentReference colorAttachmentRef{
+            .attachment = 0,  // 指定要引用的附着在附着描述结构体数组中的索引
+            .layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            // 指定进行子流程时引用的附着使用的布局方式，一般而言，这个值性能表现最佳
+        };
+        VkSubpassDescription subpass{
+            .flags             = 0,
+            .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,  // 显式指定这是一个图形渲染的子流程
+            .inputAttachmentCount    = 0,
+            .pInputAttachments       = nullptr,  // 被着色器读取的附着
+            .colorAttachmentCount    = 1,
+            .pColorAttachments       = &colorAttachmentRef,
+            .pResolveAttachments     = nullptr,  // 用于多重采样的颜色附着
+            .pDepthStencilAttachment = nullptr,  // 用于深度和模板数据的附着
+            .preserveAttachmentCount = 0,
+            .pPreserveAttachments    = nullptr,  // 没有被这一子流程使用，但需要保留数据的附着
+        };
+        /*
+        这里设置的颜色附着在数组中的索引会被片段着色器使用，
+        对应我们在片段着色器中使用的 layout(location = 0) out vec4 outColor语句。
+        */
+
+        /* 配置子流程依赖
+        渲染流程的子流程会自动进行图像布局变换。这一变换过程由子流程的依赖所决定。
+        子流程的依赖包括子流程之间的内存和执行的依赖关系。虽然我们现在只使用了一个
+        子流程，但子流程执行之前和子流程执行之后的操作也被算作隐含的子流程。
+
+        在渲染流程开始和结束时会自动进行图像布局变换，但在渲染流程开始时进行的自动变换
+        的时机和我们的需求不符，变换发生在管线开始时，但那时我们可能还没有获取到交换链
+        图像。有两种方式可以解决这个问题。一个是设置imageAvailableSemaphore信号量的
+        waitStages为VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT（一定要在管线开始的这个阶段，
+        等到imageAvailableSemaphore这个信号量），确保渲染流程在我们获取交换链
+        图像之前不会开始
+        一个是设置渲染流程等待VK_PIPELINE_STAGE_COLOR_ATTACHMENT _OUTPUT_BIT管线阶段。
+
+        srcSubpass和dstSubpass成员变量用于指定被依赖的子流程的索引和依赖被依赖的子流程的索引。
+        VK_SUBPASS_EXTERNAL用来指定我们之前提到的隐含的子流程，对srcSubpass成员变量使用
+        表示渲染流程开始前的子流程，对dstSubpass成员使用表示渲染流程结束后的子流程。这里
+        使用的索引0是我们之前创建的子流程的索引。
+        为了避免出现循环依赖，我们给dstSubpass设置的值必须始终大于srcSubpass。
+
+        我们需要等待交换链结束对图像的读取才能对图像进行访问操作，也就是等待颜色附着输出这一管线阶段。
+        // FIXME - 这里完全看不懂
+        */
+        VkSubpassDependency dependency{
+            .srcSubpass      = VK_SUBPASS_EXTERNAL,
+            .dstSubpass      = 0,
+            .srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask   = 0,
+            .dstAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dependencyFlags = 0,
+        };
+
+        // 创建渲染流程
+        VkRenderPassCreateInfo renderPassInfo{
+            .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+            .pNext           = nullptr,
+            .flags           = 0,
+            .attachmentCount = 1,
+            .pAttachments    = &colorAttachment,  
+            .subpassCount    = 1,
+            .pSubpasses      = &subpass,
+            .dependencyCount = 1,
+            .pDependencies   = &dependency,
+        };
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create render pass!";
+            throw std::runtime_error("failed to create render pass!");
+        }
+    }
+
+    void createGraphicsPipeline()
+    {
+        /**NOTE - 创建图形管线
+        现在，让我们回忆之下我们为了创建图形管线而创建的对象：
+            着色器阶段：定义了着色器模块用于图形管线哪一可编程阶段
+            固定功能状态：定义了图形管线的固定功能阶段使用的状态信息，比如输入装配，视口，光栅化，颜色混合
+            管线布局：定义了被着色器使用，在渲染时可以被动态修改的uniform变量
+            渲染流程：定义了被管线使用的附着附着的用途
+         */
+
+        // 创建着色器阶段
+        //  着色器模块对象只在管线创建时需要，所以，作为一个局部变量定义在createGraphicsPipeline函数中
+        VkShaderModule vertShaderModule = createShaderModule(readFile(shader_root + "hello_triangle_vert.spv"));
+        VkShaderModule fragShaderModule = createShaderModule(readFile(shader_root + "hello_triangle_frag.spv"));
+        // LINK - 修改这里，来使用你自己的着色器
+
+        // VkShaderModule对象只是一个对着色器字节码的包装。还需要指定它们在管线哪一阶段被使用。
+        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+            // vertex shader
+            VkPipelineShaderStageCreateInfo{
+                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext               = nullptr,
+                .flags               = 0,
+                .stage               = VK_SHADER_STAGE_VERTEX_BIT,
+                .module              = vertShaderModule,
+                .pName               = "main",
+                .pSpecializationInfo = nullptr,
+            },
+            // fragment shader
+            VkPipelineShaderStageCreateInfo{
+                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext               = nullptr,
+                .flags               = 0,
+                .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module              = fragShaderModule,
+                .pName               = "main",   // 指定阶段调用的着色器函数
+                .pSpecializationInfo = nullptr,  // 指定着色器用到的常量
+            },
+        };
+        /*
+        pName：我们可以通过使用不同pName在同一份着色器代码中实现所有需要的着色器，
+        比如在同一份代码中实现多个片段着色器，然后通过不同的pName调用它们。
+
+        pSpecializationInfo：我们可以对同一个着色器模块对象指定不同的着色器常量用于管线创建，
+        这使得编译器可以根据指定的着色器常量来消除一些条件分支，
+        这比在渲染时，使用变量配置着色器带来的效率要高得多。
+        */
+
+        // ANCHOR - 定义图形管线的固定功能状态
+
+        // 顶点输入：描述传递给顶点着色器的顶点数据格式
+        //        绑定：数据之间的间距和数据是按逐顶点的方式还是按逐实例的方式进行组织
+        //        属性描述：传递给顶点着色器的属性类型，用于将属性绑定到顶点着色器中的变量
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{
+            .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .pNext                           = nullptr,
+            .flags                           = 0,
+            .vertexBindingDescriptionCount   = 0,
+            .pVertexBindingDescriptions      = nullptr,
+            .vertexAttributeDescriptionCount = 0,
+            .pVertexAttributeDescriptions    = nullptr,
+        };
+
+        /* 输入装配
+        顶点数据定义了哪种类型的几何图元，以及是否启用几何图元重启。
+
+        一般而言，我们会通过索引缓冲来更好地复用顶点缓冲中的顶点数据。
+        如果将primitiveRestartEnable成员变量的值设置为VK_TRUE，那么如果使用带有_STRIP
+        结尾的图元类型，可以通过一个特殊索引值0xFFFF或0xFFFFFFFF达到重启图元的目
+        的(从特殊索引值之后的索引重置为图元的第一个顶点)。
+         */
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .pNext                  = nullptr,
+            .flags                  = 0,
+            .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = VK_FALSE,
+        };
+
+        /* 视口和裁剪
+        视口用于描述被用来输出渲染结果的帧缓冲区域。一般设置为(0，0)到(width，height)
+
+        需要注意，交换链图像的大小可能与窗口大小不同。
+        交换链图像在之后会被用作帧缓冲，所以这里我们设置视口大小为交换链图像的大小。
+
+        minDepth和maxDepth：值必须在[0.0f，1.0f]，特别的，minDepth的值可以大于maxDepth的值。
+        */
+        VkViewport viewport{
+            .x        = 0.0F,
+            .y        = 0.0F,
+            .width    = static_cast<float>(swapChainExtent.width),
+            .height   = static_cast<float>(swapChainExtent.height),
+            .minDepth = 0.0F,  // 指定帧缓冲使用的深度值的范围
+            .maxDepth = 1.0F,  // 指定帧缓冲使用的深度值的范围
+        };
+
+        /* 裁剪矩形
+        视口定义了图像到帧缓冲的映射关系，裁剪矩形定义了哪一区域的像素实际被存储在帧缓存。
+        任何位于裁剪矩形外的像素都会被光栅化程序丢弃。
+        ![](https://zeromake.github.io/VulkanTutorialCN/img/f14-1.jpg)
+        */
+        VkRect2D scissor{
+            .offset = VkOffset2D{0, 0},
+            .extent = swapChainExtent,
+        };
+
+        // 填写视口状态
+        VkPipelineViewportStateCreateInfo viewportState{
+            .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .pNext         = nullptr,
+            .flags         = 0,
+            .viewportCount = 1,
+            .pViewports    = &viewport,
+            .scissorCount  = 1,
+            .pScissors     = &scissor,
+        };
+
+        /* 光栅化程序的配置
+        depthClampEnable：VK_TRUE表示在近平面和远平面外的片段会被截断为在近平面和远平面上，
+        而不是直接丢弃这些片段。这对于阴影贴图的生成很有用。使用这一设置需要开启相应的GPU特性。
+
+        rasterizerDiscardEnable：
+        成员变量设置为VK_TRUE表示所有几何图元都不能通过光栅化阶段。
+
+        polygonMode：使用除了VK_POLYGON_MODE_FILL外的模式，需要启用相应的GPU特性。
+
+        lineWidth：线宽的最大值依赖于硬件，使用大于1.0f的线宽，需要启用相应的GPU特性
+
+        depthBiasEnable：光栅化程序可以添加一个常量值或是一个基于片段所处线段的斜率
+        得到的变量值到深度值上。这对于阴影贴图会很有用
+        */
+        VkPipelineRasterizationStateCreateInfo rasterizer{
+            .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .pNext                   = nullptr,
+            .flags                   = 0,
+            .depthClampEnable        = VK_FALSE,
+            .rasterizerDiscardEnable = VK_FALSE,                 // 禁止一切片段输出到帧缓冲
+            .polygonMode             = VK_POLYGON_MODE_FILL,     // 指定几何图元生成片段的方式
+            .cullMode                = VK_CULL_MODE_BACK_BIT,    // 表面剔除类型
+            .frontFace               = VK_FRONT_FACE_CLOCKWISE,  // 指定顶点顺序的朝向
+            .depthBiasEnable         = VK_FALSE,
+            .depthBiasConstantFactor = 0.0F,
+            .depthBiasClamp          = 0.0F,
+            .depthBiasSlopeFactor    = 0.0F,
+            .lineWidth = 1.0F,  // 指定光栅化后的线段宽度，它以线宽所占的片段数目为单位
+        };
+
+        /* 多重采样
+        多重采样是一种组合多个不同多边形产生的片段的颜色来决定最终的像素颜色的技术，
+        它可以一定程度上减少多边形边缘的走样现象。对于一个像素只被一个多边形产生的片段覆盖，
+        只会对覆盖它的这个片段执行一次片段着色器，使用多重采样进行反走样的代价要比使用更高
+        的分辨率渲染，然后缩小图像达到反走样的代价小得多。使用多重采样需要启用相应的GPU特性。
+        */
+        VkPipelineMultisampleStateCreateInfo multisampling{
+            .sType                 = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .rasterizationSamples  = VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable   = VK_FALSE,
+            .minSampleShading      = 1.0f,
+            .pSampleMask           = nullptr,
+            .alphaToCoverageEnable = VK_FALSE,
+            .alphaToOneEnable      = VK_FALSE,
+        };  // 这里先禁用多重采样
+
+        /* 深度和模板测试
+        暂时不使用深度和模板测试
+        */
+
+        /* 色彩混合
+        片段着色器返回的片段颜色需要和原来帧缓冲中对应像素的颜色进行混合。
+
+        VkPipelineColorBlendStateCreateInfo结构体使用了一个
+        VkPipelineColorBlendAttachmentState结构体数组指针来指定每个帧缓冲的颜色混合设置，
+        还提供了用于设置全局混合常量的成员变量。
+
+        如果想要使用第二种混合方式(位运算)，那么就需要将logicOpEnable成员变量设置为 VK_TRUE。
+        然后使用logicOp成员变量指定要使用的位运算。需要注意，这样设置后会自动禁用第一种混合方式，
+        就跟对每个绑定的帧缓冲设置blendEnable成员变量为VK_FALSE一样。
+        colorWriteMask成员变量的设置在第二种混合方式下仍然起作用，可以决定哪些颜色通道能够
+        被写入帧缓冲。我们也可以禁用所有这两种混合模式，这种情况下，片段颜色会直接覆盖原来
+        帧缓冲中存储的颜色值。
+        */
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{
+            .blendEnable         = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                              VK_COLOR_COMPONENT_A_BIT,
+        };
+        VkPipelineColorBlendStateCreateInfo colorBlending{
+            .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext           = nullptr,
+            .flags           = 0,
+            .logicOpEnable   = VK_FALSE,
+            .logicOp         = VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments    = &colorBlendAttachment,
+            .blendConstants  = {0.0F, 0.0F, 0.0F, 0.0F},
+        };  // 这里两种方式都禁用了
+
+        /* 动态状态
+        只有非常有限的管线状态可以在不重建管线的情况下进行动态修改。这包括视口大小，线宽和混合常量
+
+        这样设置后会导致我们之前对这里使用的动态状态的设置被忽略掉，需要我们在进行绘制时重新指定它们的值。
+        */
+        std::array<VkDynamicState, 2> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_LINE_WIDTH,
+        };
+        VkPipelineDynamicStateCreateInfo dynamicState{
+            .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .pNext             = nullptr,
+            .flags             = 0,
+            .dynamicStateCount = 2,
+            .pDynamicStates    = dynamicStates.data(),
+        };  // 创建图形管线那里设置了nullptr，所以不启用
+
+        /* 管线布局
+        我们可以在着色器中使用uniform变量，它可以在管线建立后动态地被应用程序修改，
+        实现对着色器进行一定程度的动态配置。uniform变量经常被用来传递变换矩阵给顶点着色器，
+        以及传递纹理采样器句柄给片段着色器。
+
+        我们在着色器中使用的uniform变量需要在管线创建时使用VkPipelineLayout对象定义。
+        */
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext                  = nullptr,
+            .flags                  = 0,
+            .setLayoutCount         = 0,
+            .pSetLayouts            = nullptr,
+            .pushConstantRangeCount = 0,
+            .pPushConstantRanges    = nullptr,
+        };  // 创建一个空管线布局
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create pipeline layout!";
+            throw std::runtime_error("failed to create pipeline layout!");
+        }
+
+        /**ANCHOR - 开始创建图形管线
+        basePipelineHandle和basePipelineIndex：用于以一个创建好的图形管线为基础创建
+        一个新的图形管线。当要创建一个和已有管线大量设置相同的管线时，使用它的代价要
+        比直接创建小，并且，对于从同一个管线衍生出的两个管线，在它们之间进行管线切换
+        操作的效率也要高很多。
+        我们可以使用basePipelineHandle来指定已经创建好的管线，或是使用basePipelineIndex
+        来指定将要创建的管线作为基础管线，用于衍生新的管线。
+
+        这两个成员变量的设置只有在VkGraphicsPipelineCreateInfo结构体的flags成员变量
+        使用了VK_PIPELINE_CREATE_DERIVATIVE_BIT标记的情况下才会起效。
+         */
+        VkGraphicsPipelineCreateInfo pipelineInfo{
+            .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext               = nullptr,
+            .flags               = 0,
+            .stageCount          = 2,
+            .pStages             = shaderStages.data(),
+            .pVertexInputState   = &vertexInputInfo,
+            .pInputAssemblyState = &inputAssembly,
+            .pTessellationState  = nullptr,
+            .pViewportState      = &viewportState,
+            .pRasterizationState = &rasterizer,
+            .pMultisampleState   = &multisampling,
+            .pDepthStencilState  = nullptr,
+            .pColorBlendState    = &colorBlending,
+            .pDynamicState       = nullptr,
+            .layout              = pipelineLayout,
+            .renderPass          = renderPass,
+            .subpass             = 0,  // 这个是subpass的索引
+            .basePipelineHandle  = VK_NULL_HANDLE,
+            .basePipelineIndex   = -1,
+        };
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) !=
+            VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create graphics pipeline!";
+            throw std::runtime_error("failed to create graphics pipeline!");
+        }
+        /*
+        vkCreateGraphicsPipelines函数被设计成一次调用可以通过多个
+        VkGraphicsPipelineCreateInfo结构体数据创建多个VkPipeline对象。
+
+        vkCreateGraphicsPipelines函数第二个参数可以用来引用一个可选的VkPipelineCache对象。
+        通过它可以将管线创建相关的数据进行缓存在多个vkCreateGraphicsPipelines函数调用中使用，
+        甚至可以将缓存存入文件，在多个程序间使用。使用它可以加速之后的管线创建。
+        */
+
+        // cleanup
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    }
+
+    void createFramebuffers()
+    {
+        /**NOTE - 帧缓冲
+        我们在创建渲染流程对象时指定使用的附着需要绑定在帧缓冲对象上使用。
+        帧缓冲对象引用了用于表示附着的VkImageView对象。对于我们的程序，
+        我们只使用了一个颜色附着。但这并不意味着我们只需要使用一张图像，
+        每个附着对应的图像个数依赖于交换链用于呈现操作的图像个数。我们需要
+        为交换链中的每个图像创建对应的帧缓冲，在渲染时，渲染到对应的帧缓冲上。
+         */
+
+        swapChainFramebuffers.resize(swapChainImageViews.size());
+        // 数组大小：swapChainFramebuffers==swapChainImageViews==swapChainImages
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++)
+        {
+            std::array<VkImageView, 1> attachments = {swapChainImageViews[i]};
+
+            VkFramebufferCreateInfo framebufferInfo{
+                .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                .pNext           = nullptr,
+                .flags           = 0,
+                .renderPass      = renderPass,
+                .attachmentCount = attachments.size(),  // 指定附着个数
+                .pAttachments    = attachments.data(),  // 描述附着信息的pAttachment数组
+                .width           = swapChainExtent.width,
+                .height          = swapChainExtent.height,
+                .layers          = 1,  // 指定图像层数
+            };
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
+            {
+                LOG(ERROR) << "failed to create framebuffer!";
+                throw std::runtime_error("failed to create framebuffer!");
+            }
+            /*
+            首先指定帧缓冲需要兼容的渲染流程对象。之后的渲染操作，我们可以使用与这个指定的
+            渲染流程对象相兼容的其它渲染流程对象。一般来说，使用相同数量，相同类型附着的
+            渲染流程对象是相兼容的。
+            */
+        }
+    }
+
+    void createCommandPool()
+    {
+        /**NOTE - 指令缓冲
+        Vulkan下的指令，比如绘制指令和内存传输指令并不是直接通过函数调用执行的。
+        我们需要将所有要执行的操作记录在一个指令缓冲对象，然后提交给可以执行这些
+        操作的队列才能执行。这使得我们可以在程序初始化时就准备好所有要指定的指令序列，
+        在渲染时直接提交执行。也使得多线程提交指令变得更加容易。
+         */
+
+        QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
+
+        /* 指令池
+        每个指令池对象分配的指令缓冲对象只能提交给一个特定类型的队列。
+
+        有两种用于指令池对象创建的标记，可以提供有用的信息给Vulkan的驱动程序进行一定优化处理：
+            VK_COMMAND_POOL_CREATE_TRANSIENT_BIT：
+            使用它分配的指令缓冲对象被频繁用来记录新的指令
+            VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT：
+            指令缓冲对象之间相互独立，不会被一起重置。
+        */
+        VkCommandPoolCreateInfo poolInfo{
+            .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .pNext            = nullptr,
+            .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,  // 指令池标记
+            .queueFamilyIndex = static_cast<uint32_t>(queueFamilyIndices.graphicsFamily),
+        };
+        if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create command pool!";
+            throw std::runtime_error("failed to create command pool!");
+        }
+    }
+
+    void createCommandBuffers()
+    {
+        commandBuffers.resize(swapChainFramebuffers.size());
+
+        /* 指令缓冲
+        level成员变量用于指定分配的指令缓冲对象是主要指令缓冲对象还是辅助指令缓冲对象：
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY：
+            可以被提交到队列进行执行，但不能被其它指令缓冲对象调用。
+            VK_COMMAND_BUFFER_LEVEL_SECONDARY：
+            不能直接被提交到队列进行执行，但可以被主要指令缓冲对象调用执行。
+
+        在这里，我们没有使用辅助指令缓冲对象，但辅助治理给缓冲对象的好处是显而易见的，我们可以把一些常用的指令存储在辅助指令缓冲对象，然后在主要指令缓冲对象中调用执行
+        */
+        VkCommandBufferAllocateInfo allocInfo{
+            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext              = nullptr,
+            .commandPool        = commandPool,
+            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = static_cast<uint32_t>(commandBuffers.size()),
+        };
+        if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to allocate command buffers!";
+            throw std::runtime_error("failed to allocate command buffers!");
+        }
+    }
+
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, const uint32_t imageIndex)
+    {
+        /* 记录指令到指令缓冲
+               flags成员变量用于指定我们将要怎样使用指令缓冲。它的值可以是下面这些：
+                   VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT：
+                   指令缓冲在执行一次后，就被用来记录新的指令。
+                   VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT：
+                   这是一个只在一个渲染流程内使用的辅助指令缓冲。
+                   VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT：
+                   在指令缓冲等待执行时，仍然可以提交这一指令缓冲。
+
+               在这里，我们使用了VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT标记，
+               这使得我们可以在上一帧还未结束渲染时，提交下一帧的渲染指令。pInheritanceInfo成员
+               变量只用于辅助指令缓冲，可以用它来指定从调用它的主要指令缓冲继承的状态。
+
+               指令缓冲对象记录指令后，调用vkBeginCommandBuffer函数会重置指令缓冲对象。
+               */
+
+        // 启动指令缓冲
+        VkCommandBufferBeginInfo beginInfo{
+            .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext            = nullptr,
+            .flags            = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+            .pInheritanceInfo = nullptr,
+        };
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to begin recording command buffer!";
+            throw std::runtime_error("failed to begin recording command buffer!");
+        }
+
+        // 启动渲染流程
+        VkClearValue          clearColor = {0.0F, 0.0F, 0.0F, 1.0F};
+        VkRenderPassBeginInfo renderPassInfo{
+            .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .pNext           = nullptr,
+            .renderPass      = renderPass,
+            .framebuffer     = swapChainFramebuffers[imageIndex],
+            .renderArea      = VkRect2D{.offset = {.x = 0, .y = 0}, .extent = swapChainExtent},
+            .clearValueCount = 1,
+            .pClearValues    = &clearColor,
+        };
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        /*
+        最后一个参数是用来指定渲染流程如何提供绘制指令的标记：
+            VK_SUBPASS_CONTENTS_INLINE：
+            所有要执行的指令都在主要指令缓冲中，没有辅助指令缓冲需要执行。
+            VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS：
+            有来自辅助指令缓冲的指令需要执行。
+        */
+
+        /* 绑定图形管线
+        vkCmdBindPipeline函数的第二个参数用于指定管线对象是图形管线还是计算管线。
+        */
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+
+        /* 绘制
+        我们使用vkCmdDraw函数来提交绘制操作到指令缓冲，
+        它的第一个参数是记录有要执行的指令的指令缓冲对象，它的剩余参数依次是：
+            vertexCount：尽管这里我们没有使用顶点缓冲，但仍然需要指定三个顶点用于三角形的绘制。
+            instanceCount：用于实例渲染，为1时表示不进行实例渲染。
+            firstVertex：用于定义着色器变量gl_VertexIndex的值。
+            firstInstance：用于定义着色器变量gl_InstanceIndex的值。
+        */
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+        // 结束渲染流程，并提交指令
+        vkCmdEndRenderPass(commandBuffer);
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to record command buffer!";
+            throw std::runtime_error("failed to record command buffer!");
+        }
+    }
+
+    void  drawFrame()
+    {
+        /**NOTE - 渲染与呈现
+        我们编写的drawFrame函数用于执行下面的操作：
+            从交换链获取一张图像
+            对帧缓冲附着执行指令缓冲中的渲染指令
+            返回渲染后的图像到交换链进行呈现操作
+
+        上面这些操作每一个都是通过一个函数调用设置的,但每个操作的实际执行却是异步进行的。
+        函数调用会在操作实际结束前返回，并且操作的实际执行顺序也是不确定的。
+
+        有两种用于同步交换链事件的方式：栅栏(fence)和信号量(semaphore)。
+
+        栅栏(fence)和信号量(semaphore)的不同之处是，我们可以通过调用vkWaitForFences
+        函数查询栅栏(fence)的状态，但不能查询信号量(semaphore)的状态。通常，我们使用
+        栅栏(fence)来对应用程序本身和渲染操作进行同步。使用信号量(semaphore)来对一个
+        指令队列内的操作或多个不同指令队列的操作进行同步。这里，我们想要通过指令队列
+        中的绘制操作和呈现操作，显然，使用信号量(semaphore)更加合适。
+        */
+
+        /*
+        vkWaitForFences函数可以用来等待一组栅栏(fence)中的一个或全部栅栏(fence)发出信号。
+        VK_TRUE：指定它等待所有在数组中指定的栅栏(fence)。
+
+        和信号量不同，等待栅栏发出信号后，需要调用vkResetFences函数手动将fence重置为未发出信号的状态。
+        */
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, std::numeric_limits<uint64_t>::max());
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+        // 从交换链获取图像
+        uint32_t imageIndex = 0;
+        vkAcquireNextImageKHR(device, swapChain, std::numeric_limits<uint64_t>::max(),
+                              imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+        //
+        vkResetCommandBuffer(commandBuffers[imageIndex], /*VkCommandBufferResetFlagBits*/ 0);
+        recordCommandBuffer(commandBuffers[imageIndex], imageIndex);
+
+        // 提交指令
+        std::array<VkSemaphore, 1>          waitSemaphores   = {imageAvailableSemaphores[currentFrame]};
+        std::array<VkPipelineStageFlags, 1> waitStages       = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        std::array<VkSemaphore, 1>          signalSemaphores = {renderFinishedSemaphores[currentFrame]};
+        VkSubmitInfo                        submitInfo{
+                                   .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                   .pNext                = nullptr,
+                                   .waitSemaphoreCount   = 1,
+                                   .pWaitSemaphores      = waitSemaphores.data(),
+                                   .pWaitDstStageMask    = waitStages.data(),
+                                   .commandBufferCount   = 1,  // 可以同时大批量提交数据
+                                   .pCommandBuffers      = &commandBuffers[imageIndex],
+                                   .signalSemaphoreCount = 1,
+                                   .pSignalSemaphores    = &renderFinishedSemaphores[currentFrame],
+        };
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to submit draw command buffer!";
+            throw std::runtime_error("failed to submit draw command buffer!");
+        }
+        /*
+        这里，我们需要写入颜色数据到图像，所以我们指定等待图像管线到达可以写入颜色附着的管线阶段。
+        waitStages数组中的条目和pWaitSemaphores中相同索引的信号量相对应。
+
+        vkQueueSubmit函数的最后一个参数是一个可选的栅栏对象，
+        可以用它同步提交的指令缓冲执行结束后要进行的操作。
+        */
+
+        // 呈现
+        VkPresentInfoKHR presentInfo{
+            .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext              = nullptr,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores    = &renderFinishedSemaphores[currentFrame],
+            .swapchainCount     = 1,
+            .pSwapchains        = &swapChain,
+            .pImageIndices      = &imageIndex,
+            .pResults           = nullptr,
+        };
+        vkQueuePresentKHR(presentQueue, &presentInfo);
+        /*
+        我们可以通过pResults成员变量获取每个交换链的呈现操作是否成功的信息。
+        在这里，由于我们只使用了一个交换链，可以直接使用呈现函数的返回值来
+        判断呈现操作是否成功，没有必要使用pResults。
+        */
+
+        /**NOTE -
+        我们的应用程序的内存使用量一直在慢慢增加。这是由于我们的drawFrame函数以很快
+        地速度提交指令，但却没有在下一次指令提交时检查上一次提交的指令是否已经执行结束。
+        也就是说CPU提交指令快过GPU对指令的处理速度，造成GPU需要处理的指令大量堆积。
+        更糟糕的是这种情况下，我们实际上对多个帧同时使用了相同的
+        imageAvailableSemaphore和renderFinishedSemaphore信号量。
+
+        最简单的解决上面这一问题的方法是使用vkQueueWaitIdle函数来等待上一次提交的指令
+        结束执行，再提交下一帧的指令：
+            vkQueueWaitIdle(presentQueue);
+         */
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    void createSemaphores()
+    {
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
+        // 创建信号量
+        VkSemaphoreCreateInfo semaphoreInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+        };
+        /*
+        栅栏(fence)对象在创建后是未发出信号的状态。这就意味着如果我们没有在vkWaitForFences
+        函数调用之前发出栅栏(fence)信号，vkWaitForFences函数调用将会一直处于等待状态。
+        */
+        VkFenceCreateInfo fenceInfo{
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+        };
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
+                vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+                vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS)
+            {
+                LOG(ERROR) << "failed to create semaphores and fences!";
+                throw std::runtime_error("failed to create semaphores and fences!");
+            }
+        }
+    }
+
+    void recreateSwapChain();  // TODO - 重建交换链
 };
 
 int main(int argc, char** argv)
@@ -627,16 +1528,18 @@ int main(int argc, char** argv)
 
     try
     {
-        HelloTriangleApplication app;
-        app.run();
+        std::shared_ptr<HelloTriangleApplication> app(new HelloTriangleApplication());
+        app->run();
     }
     catch (const std::exception& e)
     {
         // 执行过程中，如果发生错误，会抛出一个带有错误描述信息的std::runtime_error异常，
         // 为了处理多种不同类型的异常，我们使用更加通用的std::exception来接受异常。
-        std::cerr << e.what() << std::endl;
+        LOG(ERROR) << e.what();
+        throw std::runtime_error(e.what());
         return EXIT_FAILURE;
     }
 
+    google::ShutdownGoogleLogging();
     return EXIT_SUCCESS;
 }
