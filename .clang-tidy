@@ -1,11 +1,13 @@
-Checks:
-    modernize-*,
-    portability-*,
-    cppcoreguidelines-*,
-    performance-*,
-    readability-*,
-    
-    bugprone-*,
-    misc-*,
-    google-*,
+Checks: >
+  modernize-*,
+  portability-*,
+  cppcoreguidelines-*,
+  performance-*,
+  readability-*,
 
+  bugprone-*,
+  misc-*,
+  google-*,
+
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard

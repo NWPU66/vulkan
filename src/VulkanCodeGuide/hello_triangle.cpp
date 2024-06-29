@@ -167,20 +167,7 @@ private:
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
         vkDestroyCommandPool(device, commandPool, nullptr);
-        // 清除帧缓冲对象
-        for (auto* framebuffer : swapChainFramebuffers)
-        {
-            vkDestroyFramebuffer(device, framebuffer, nullptr);
-        }
-        vkDestroyPipeline(device, graphicsPipeline, nullptr);
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        vkDestroyRenderPass(device, renderPass, nullptr);
-        // 清除图像视图
-        for (auto* imageView : swapChainImageViews)
-        {
-            vkDestroyImageView(device, imageView, nullptr);
-        }
-        vkDestroySwapchainKHR(device, swapChain, nullptr);
+        cleanupSwapChain();  // 清理交换链
         vkDestroyDevice(device, nullptr);
         if (enableValidationLayers)  // 清除VK校验层
         {
@@ -423,7 +410,7 @@ private:
         {
             if (queueFamily.queueCount > 0 && ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0))
             {
-                indices.graphicsFamily = i;     
+                indices.graphicsFamily = i;
             }
 
             // 检查物理设备是否具有呈现能力
@@ -620,7 +607,7 @@ private:
         return bestMode;
     }
 
-    static VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
+    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
     {
         // 交换范围是交换链中图像的分辨率，它几乎总是和我们要显示图像的窗口的分辨率相同。
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
@@ -628,8 +615,14 @@ private:
             return capabilities.currentExtent;
         }
 
-        return {std::clamp(screen_width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
-                std::clamp(screen_height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)};
+        int width  = 0;
+        int height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        VkExtent2D actualExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+
+        return {
+            std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+            std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)};
     }
 
     void createSwapChain()
@@ -895,7 +888,7 @@ private:
             .pNext           = nullptr,
             .flags           = 0,
             .attachmentCount = 1,
-            .pAttachments    = &colorAttachment,  
+            .pAttachments    = &colorAttachment,
             .subpassCount    = 1,
             .pSubpasses      = &subpass,
             .dependencyCount = 1,
@@ -1380,7 +1373,7 @@ private:
         }
     }
 
-    void  drawFrame()
+    void drawFrame()
     {
         /**NOTE - 渲染与呈现
         我们编写的drawFrame函数用于执行下面的操作：
@@ -1511,7 +1504,53 @@ private:
         }
     }
 
-    void recreateSwapChain();  // TODO - 重建交换链
+    void cleanupSwapChain()
+    {
+        // 清除帧缓冲对象
+        for (auto* framebuffer : swapChainFramebuffers)
+        {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+
+        /*
+        对于指令池对象，我们不需要重建，
+        只需要调用vkFreeCommandBuffers函数清除它分配的指令缓冲对象即可。
+        */
+        vkFreeCommandBuffers(device, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
+
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyRenderPass(device, renderPass, nullptr);
+        // 清除图像视图
+        for (auto* imageView : swapChainImageViews)
+        {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+    }
+
+    void recreateSwapChain()
+    {
+        vkDeviceWaitIdle(device);
+
+        cleanupSwapChain();
+
+        createSwapChain();
+        createImageViews();
+        createRenderPass();
+        createGraphicsPipeline();
+        createFramebuffers();
+        createCommandBuffers();
+        /** NOTE - 重建交换链
+        至此，我们就完成了交换链重建的所有工作！但是，我们使用的这一重建方法需要等待正在
+        执行的所有设备操作结束才能进行。实际上，是可以在渲染操作执行，原来的交换链仍在使
+        用时重建新的交换链，只需要在创建新的交换链时使用VkSwapchainCreateInfoKHR结构
+        体的oldSwapChain成员变量引用原来的交换链即可。之后，在旧的交换链结束使用时就可
+        以清除它。
+        */
+
+        // TODO - 重建交换链
+    }
 };
 
 int main(int argc, char** argv)
