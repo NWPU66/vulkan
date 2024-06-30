@@ -1,5 +1,6 @@
 #pragma once
 // c library
+#include <array>
 #include <cassert>
 #include <cctype>
 #include <cerrno>
@@ -8,6 +9,7 @@
 #include <climits>
 #include <cmath>
 #include <csetjmp>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -57,3 +59,31 @@
 
 // glog
 #include <glog/logging.h>
+
+// arrayRef
+template <typename T> class arrayRef {
+private:
+    T* const pArray = nullptr;
+    size_t   count  = 0;
+
+public:
+    // constructor
+    arrayRef() = default;
+    arrayRef(T& data) : pArray(&data), count(1) {}
+    template <size_t elementCount>
+    arrayRef(std::array<T, elementCount>& data) : pArray(data.data()), count(elementCount){};
+    arrayRef(T* pData, size_t elementCount) : pArray(pData), count(elementCount) {}
+    arrayRef(const arrayRef<std::remove_const_t<T>>& other) : pArray(other.Pointer()), count(other.Count()) {}
+
+    // getter
+    T*     Pointer() const { return pArray; }
+    size_t Count() const { return count; }
+
+    // Const Function
+    T& operator[](size_t index) const { return pArray[index]; }
+    T* begin() const { return pArray; }
+    T* end() const { return pArray + count; }
+
+    // Non-const Function
+    arrayRef& operator=(const arrayRef&) = delete;  // 禁止复制/移动赋值
+};

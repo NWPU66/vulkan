@@ -14,6 +14,10 @@ int main(int argc, char** argv)
 
     if (!InitializeWindow(VkExtent2D{1280, 720})) { return EXIT_FAILURE; }
 
+    fence     fence(VK_FENCE_CREATE_SIGNALED_BIT);  // 以置位状态创建栅栏
+    semaphore semaphore_imageIsAvailable;
+    semaphore semaphore_renderingIsOver;
+
     while (glfwWindowShouldClose(pWindow) == 0)
     {
         /*渲染过程，待填充*/

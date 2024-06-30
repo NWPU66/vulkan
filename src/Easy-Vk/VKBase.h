@@ -16,6 +16,131 @@ namespace vulkan {
 
 };  // namespace vulkan
 
+#define DestroyHandleBy(Func)                                                                                          \
+    if (handle)                                                                                                        \
+    {                                                                                                                  \
+        Func(GraphicsBase::Base().Device(), handle, nullptr);                                                          \
+        handle = VK_NULL_HANDLE;                                                                                       \
+    }
+
+#define MoveHandle                                                                                                     \
+    handle       = other.handle;                                                                                       \
+    other.handle = VK_NULL_HANDLE;
+
+#define DefineHandleTypeOperator                                                                                       \
+    operator decltype(handle)() const                                                                                  \
+    {                                                                                                                  \
+        return handle;                                                                                                 \
+    }
+/*
+别把operator decltype(handle)写成operator auto（除非你是对继承深恶痛绝的的程序员），
+到占位类型的类型转换函数不能在派生类中被using重设其访问级别。
+*/
+#define DefineAddressFunction                                                                                          \
+    const decltype(handle)* Address() const                                                                            \
+    {                                                                                                                  \
+        return &handle;                                                                                                \
+    }
+/*
+你可以把const decltype(handle)*简化成auto
+*/
+
+#define ExecuteOnce(...)                                                                                               \
+    {                                                                                                                  \
+        static bool executed = false;                                                                                  \
+        if (executed) return __VA_ARGS__;                                                                              \
+        executed = true;                                                                                               \
+    }
+
+constexpr struct outStream_t
+{
+    static std::stringstream ss;
+    struct returnedStream_t
+    {
+        returnedStream_t operator<<(const std::string& string) const
+        {
+            ss << string;
+            return {};
+        }
+    };
+    returnedStream_t operator<<(const std::string& string) const
+    {
+        ss.clear();
+        ss << string;
+        return {};
+    }
+} outStream;
+inline std::stringstream outStream_t::ss;
+/*
+使用方法：outStream_t<<"hello "<<"world!";
+1. outStream_t<<"hello "执行这句话的时候把"hello "送进ss，返回一个returnedStream_t空对象
+2. returnedStream_t<<"world!"执行这句话时继续向ss写入"world!"
+*/
+
+// inline const auto& outStream = std::cout;  // 不是constexpr，因为std::cout具有外部链接
+/*
+constexpr 的值再编译阶段就要确定
+而std::cout被申明为extern变量，std::cout再链接阶段才会被检查
+*/
+
+#ifndef NDEBUG
+#    define ENABLE_DEBUG_MESSENGER true
+#else
+#    define ENABLE_DEBUG_MESSENGER false
+#endif
+
+#define VK_RESULT_THROW
+#ifdef VK_RESULT_THROW
+/**
+ * @brief
+ *
+ */
+class result_t {
+    VkResult result;
+
+public:
+    static std::function<void(VkResult)> callback_throw;
+    result_t(VkResult result) : result(result) {}
+    result_t(result_t&& other) noexcept : result(other.result) { other.result = VK_SUCCESS; }
+    result_t& operator=(const VkResult& _result)
+    {
+        result = _result;
+        return *this;
+    }
+    ~result_t() noexcept(false)
+    {
+        if (static_cast<uint32_t>(result) < VK_RESULT_MAX_ENUM) { return; }
+        if (callback_throw) { callback_throw(result); }
+        throw result;
+    }
+    operator VkResult()  // result_t 到 VkResult的隐式转换
+    {
+        VkResult result = this->result;
+        this->result    = VK_SUCCESS;
+        return result;
+    }
+};
+inline std::function<void(VkResult)> result_t::callback_throw = nullptr;
+
+#elif defined VK_RESULT_NODISCARD
+/**
+ * @brief
+ *
+ */
+struct [[nodiscard]] result_t
+{
+    VkResult result;
+    result_t(VkResult result) : result(result) {}
+    operator VkResult() const { return result; }
+};
+// 在本文件中关闭弃值提醒（因为我懒得做处理）
+#    pragma warning(disable : 4834)
+#    pragma warning(disable : 6031)
+
+#else
+using result_t = VkResult;
+#endif
+
 class GraphicsBase {
     /* 单例类
     定义移动构造器（删除也算进行了定义），且没有定义复制构造器、复制赋值、移动赋值时，
@@ -134,7 +259,7 @@ private:
      *
      * @return VkResult 将对应的队列族索引返回到queueFamilyIndices，执行成功时直接将索引写入相应成员变量
      */
-    VkResult GetQueueFamilyIndices(VkPhysicalDevice         physicalDevice,
+    result_t GetQueueFamilyIndices(VkPhysicalDevice         physicalDevice,
                                    bool                     enableGraphicsQueue,
                                    bool                     enableComputeQueue,
                                    std::array<uint32_t, 3>& queueFamilyIndices)
@@ -169,7 +294,7 @@ private:
             VkBool32 supportPresentation = 0U;
             if (surface != nullptr)
             {
-                if (VkResult result =
+                if (result_t result =
                         vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, &supportPresentation))
                 {
                     LOG(ERROR) << "Failed to determine if the queue family supports presentation!\nError code: "
@@ -220,9 +345,9 @@ private:
     /**
      * @brief 该函数被CreateSwapchain(...)和RecreateSwapchain()调用
      */
-    VkResult CreateSwapchain_Internal()
+    result_t CreateSwapchain_Internal()
     {
-        if (VkResult result = vkCreateSwapchainKHR(device, &swapchainCreateInfo, nullptr, &swapchain))
+        if (result_t result = vkCreateSwapchainKHR(device, &swapchainCreateInfo, nullptr, &swapchain))
         {
             LOG(ERROR) << "Failed to create a swapchain!\nError code: " << static_cast<int32_t>(result);
             return result;
@@ -230,13 +355,13 @@ private:
 
         // 获取交换链图像
         uint32_t swapchainImageCount = 0;
-        if (VkResult result = vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr))
+        if (result_t result = vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, nullptr))
         {
             LOG(ERROR) << "Failed to get the count of swapchain images!\nError code: " << static_cast<int32_t>(result);
             return result;
         }
         swapchainImages.resize(swapchainImageCount);
-        if (VkResult result = vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data()))
+        if (result_t result = vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data()))
         {
             LOG(ERROR) << "Failed to get swapchain images!\nError code: " << static_cast<int32_t>(result);
             return result;
@@ -254,7 +379,7 @@ private:
         for (size_t i = 0; i < swapchainImageCount; i++)
         {
             imageViewCreateInfo.image = swapchainImages[i];
-            if (VkResult result = vkCreateImageView(device, &imageViewCreateInfo, nullptr, &swapchainImageViews[i]))
+            if (result_t result = vkCreateImageView(device, &imageViewCreateInfo, nullptr, &swapchainImageViews[i]))
             {
                 LOG(ERROR) << "Failed to create a swapchain image view!\nError code: " << static_cast<int32_t>(result);
                 return result;
@@ -343,7 +468,7 @@ public:
     {
         if (this->surface == nullptr) { this->surface = surface; }
     }
-    VkResult SetSurfaceFormat(VkSurfaceFormatKHR surfaceFormat)
+    result_t SetSurfaceFormat(VkSurfaceFormatKHR surfaceFormat)
     {
         bool formatIsAvailable = false;
         if (surfaceFormat.format == 0)
@@ -395,7 +520,7 @@ public:
     /**
      * @brief 检查是否可以使用Vulkan的最新版本
      */
-    VkResult UseLatestApiVersion()
+    result_t UseLatestApiVersion()
     {
         /*
         如果你想使用Vulkan的最新版本，须在创建Vulkan实例前，用vkEnumerateInstanceVersion(...)
@@ -414,12 +539,13 @@ public:
     /**
      * @brief 创建Vulkan实例
      */
-    VkResult CreateInstance(VkInstanceCreateFlags flags = 0)
+    result_t CreateInstance(VkInstanceCreateFlags flags = 0)
     {
-#ifndef NDEBUG
-        AddInstanceLayer("VK_LAYER_KHRONOS_validation");
-        AddInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-#endif
+        if constexpr (ENABLE_DEBUG_MESSENGER)
+        {
+            AddInstanceLayer("VK_LAYER_KHRONOS_validation");
+            AddInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
 
         VkApplicationInfo applicatianInfo = {
             .sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -434,7 +560,7 @@ public:
             .enabledExtensionCount   = static_cast<uint32_t>(instanceExtensions.size()),
             .ppEnabledExtensionNames = instanceExtensions.data(),
         };
-        if (VkResult result = vkCreateInstance(&instanceCreateInfo, nullptr, &instance))
+        if (result_t result = vkCreateInstance(&instanceCreateInfo, nullptr, &instance))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to create a vulkan instance!\nError code: "
                        << static_cast<int32_t>(result);
@@ -446,9 +572,8 @@ public:
         LOG(INFO) << "[ graphicsBase ] INFO\nVulkan API Version: " << VK_VERSION_MAJOR(apiVersion) << "."
                   << VK_VERSION_MINOR(apiVersion) << "." << VK_VERSION_PATCH(apiVersion) << "\n";
 
-#ifndef NDEBUG
-        CreateDebugMessenger();  // 创建完Vulkan实例后紧接着创建debug messenger
-#endif
+        if constexpr (ENABLE_DEBUG_MESSENGER) { CreateDebugMessenger(); }
+
         return VK_SUCCESS;
     }
 
@@ -457,11 +582,11 @@ public:
      *
      * @return VkResult 返回值则指示在获取可用层或扩展列表时是否发生错误。
      */
-    VkResult CheckInstanceLayers(std::vector<const char*>& layersToCheck)
+    result_t CheckInstanceLayers(std::vector<const char*>& layersToCheck)
     {
         uint32_t                       layerCount = 0;
         std::vector<VkLayerProperties> availableLayers;
-        if (VkResult result = vkEnumerateInstanceLayerProperties(&layerCount, nullptr))
+        if (result_t result = vkEnumerateInstanceLayerProperties(&layerCount, nullptr))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get the count of instance layers!";
             return result;
@@ -470,7 +595,7 @@ public:
         if (layerCount != 0U)
         {
             availableLayers.resize(layerCount);
-            if (VkResult result = vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data()))
+            if (result_t result = vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data()))
             {
                 LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to enumerate instance layer properties!\nError code: "
                            << static_cast<int32_t>(result);
@@ -501,11 +626,11 @@ public:
      *
      * @return VkResult 返回值则指示在获取可用层或扩展列表时是否发生错误。
      */
-    VkResult CheckInstanceExtensions(std::vector<const char*>& extensionsToCheck, const char* layerName = nullptr) const
+    result_t CheckInstanceExtensions(std::vector<const char*>& extensionsToCheck, const char* layerName = nullptr) const
     {
         uint32_t                           extensionCount = 0;
         std::vector<VkExtensionProperties> availableExtensions;
-        if (VkResult result = vkEnumerateInstanceExtensionProperties(layerName, &extensionCount, nullptr))
+        if (result_t result = vkEnumerateInstanceExtensionProperties(layerName, &extensionCount, nullptr))
         {
             (layerName != nullptr) ?
                 LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get the count of instance extensions!\nLayer name:"
@@ -517,7 +642,7 @@ public:
         if (extensionCount != 0U)
         {
             availableExtensions.resize(extensionCount);
-            if (VkResult result =
+            if (result_t result =
                     vkEnumerateInstanceExtensionProperties(layerName, &extensionCount, availableExtensions.data()))
             {
                 LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to enumerate instance extension properties!\nError code: "
@@ -547,7 +672,7 @@ public:
     /**
      * @brief Create a Debug Messenger object
      */
-    VkResult CreateDebugMessenger()
+    result_t CreateDebugMessenger()
     {
         // 回调函数
         static PFN_vkDebugUtilsMessengerCallbackEXT DebugUtilsMessengerCallback =
@@ -570,7 +695,7 @@ public:
                                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
                 .pfnUserCallback = DebugUtilsMessengerCallback,
             };
-            VkResult result =
+            result_t result =
                 vkCreateDebugUtilsMessenger(instance, &debugUtilsMessengerCreateInfo, nullptr, &debugUtilsMessenger);
             if (result != 0)
             {
@@ -587,10 +712,10 @@ public:
     /**
      * @brief Get the Surface Formats
      */
-    VkResult GetSurfaceFormats()
+    result_t GetSurfaceFormats()
     {
         uint32_t surfaceFormatCount = 0;
-        if (VkResult result =
+        if (result_t result =
                 vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount, nullptr))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get the count of surface formats!\nError code: "
@@ -604,7 +729,7 @@ public:
         }
 
         availableSurfaceFormats.resize(surfaceFormatCount);
-        VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount,
+        result_t result = vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount,
                                                                availableSurfaceFormats.data());
         if (result != 0)
         {
@@ -619,10 +744,10 @@ public:
     /**
      * @brief Get the Physical Devices object
      */
-    VkResult GetPhysicalDevices()
+    result_t GetPhysicalDevices()
     {
         uint32_t deviceCount = 0;
-        if (VkResult result = vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr))
+        if (result_t result = vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get the count of physical devices!\nError code: "
                        << static_cast<int32_t>(result);
@@ -634,7 +759,7 @@ public:
             abort();
         }
         availablePhysicalDevices.resize(deviceCount);
-        VkResult result = vkEnumeratePhysicalDevices(instance, &deviceCount, availablePhysicalDevices.data());
+        result_t result = vkEnumeratePhysicalDevices(instance, &deviceCount, availablePhysicalDevices.data());
         if (result != 0)
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to enumerate physical devices!\nError code: "
@@ -648,7 +773,7 @@ public:
      *
      * REVIEW - 说实话，我没有看懂
      */
-    VkResult
+    result_t
     DeterminePhysicalDevice(uint32_t deviceIndex = 0, bool enableGraphicsQueue = true, bool enableComputeQueue = true)
     {
         // 定义一个特殊值用于标记一个队列族索引已被找过但未找到
@@ -676,7 +801,7 @@ public:
             ic == VK_QUEUE_FAMILY_IGNORED && enableComputeQueue)
         {
             std::array<uint32_t, 3> indices = {};
-            VkResult result = GetQueueFamilyIndices(availablePhysicalDevices[deviceIndex], enableGraphicsQueue,
+            result_t result = GetQueueFamilyIndices(availablePhysicalDevices[deviceIndex], enableGraphicsQueue,
                                                     enableComputeQueue, indices);
             /*
             若GetQueueFamilyIndices(...)返回VK_SUCCESS或VK_RESULT_MAX_ENUM
@@ -716,7 +841,7 @@ public:
     /**
      * @brief 创建逻辑设备
      */
-    VkResult CreateDevice(VkDeviceCreateFlags flags = 0)
+    result_t CreateDevice(VkDeviceCreateFlags flags = 0)
     {
         /**NOTE - 受保护的队列
         flags指定为VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT，说明该队列受保护。
@@ -768,7 +893,7 @@ public:
             .ppEnabledExtensionNames = deviceExtensions.data(),
             .pEnabledFeatures        = &physicalDeviceFeatures,
         };
-        if (VkResult result = vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device))
+        if (result_t result = vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to create a vulkan logical device!";
             return result;
@@ -798,7 +923,7 @@ public:
         return VK_SUCCESS;
     }
 
-    VkResult CheckDeviceExtensions(const std::vector<const char*>& extensionsToCheck,
+    result_t CheckDeviceExtensions(const std::vector<const char*>& extensionsToCheck,
                                    const char*                     layerName = nullptr) const
     {
         // TODO - /*待Ch1-3填充*/
@@ -809,9 +934,9 @@ public:
     /**
      * @brief 该函数用于等待逻辑设备空闲
      */
-    VkResult WaitIdle() const
+    result_t WaitIdle() const
     {
-        VkResult result = vkDeviceWaitIdle(device);
+        result_t result = vkDeviceWaitIdle(device);
         if (result != 0)
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to wait for the device to be idle!\nError code: "
@@ -824,7 +949,7 @@ public:
      * @brief 该函数用于重建逻辑设备
      * @note System does not provide avability to change logical device
      */
-    VkResult RecreateDevice(VkDeviceCreateFlags flags = 0)
+    result_t RecreateDevice(VkDeviceCreateFlags flags = 0)
     {
         LOG(WARNING) << "System does not provide avability to change logical device";
         return VK_SUCCESS;
@@ -835,10 +960,10 @@ public:
     /**
      * @brief 创建交换链
      */
-    VkResult CreateSwapchain(bool limitFrameRate = true, VkSwapchainCreateFlagsKHR flags = 0)
+    result_t CreateSwapchain(bool limitFrameRate = true, VkSwapchainCreateFlagsKHR flags = 0)
     {
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
-        if (VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities))
+        if (result_t result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get physical device surface capabilities!\nError code: "
                        << static_cast<int32_t>(result);
@@ -924,7 +1049,7 @@ public:
         // 设置交换链的图像格式
         if (availableSurfaceFormats.empty())
         {
-            if (VkResult result = GetSurfaceFormats()) { return result; }
+            if (result_t result = GetSurfaceFormats()) { return result; }
         }
         /*
         默认格式应当满足：RGBA四通道，每个通道8位的UNORM格式。8位表示每个通道有256个
@@ -956,7 +1081,7 @@ public:
         需要限制帧率使其最大不超过屏幕刷新率时应选择VK_PRESENT_MODE_FIFO_KHR
         */
         uint32_t surfacePresentModeCount = 0;
-        if (VkResult result =
+        if (result_t result =
                 vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &surfacePresentModeCount, nullptr))
         {
             LOG(WARNING) << "[ graphicsBase ] WARNING\nFailed to get the count of surface present modes!";
@@ -968,7 +1093,7 @@ public:
             abort();
         }
         std::vector<VkPresentModeKHR> surfacePresentModes(surfacePresentModeCount);
-        if (VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(
+        if (result_t result = vkGetPhysicalDeviceSurfacePresentModesKHR(
                 physicalDevice, surface, &surfacePresentModeCount, surfacePresentModes.data()))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get surface present modes!\nError code: "
@@ -994,7 +1119,7 @@ public:
         swapchainCreateInfo.clipped          = VK_TRUE;
 
         // 创建交换链
-        if (VkResult result = CreateSwapchain_Internal()) { return result; }
+        if (result_t result = CreateSwapchain_Internal()) { return result; }
         // 执行回调函数
         for (auto& i : callbacks_createSwapchain) { i(); }
 
@@ -1004,10 +1129,10 @@ public:
     /**
      * @brief 重建交换链
      */
-    VkResult RecreateSwapchain()
+    result_t RecreateSwapchain()
     {
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
-        if (VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities))
+        if (result_t result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities))
         {
             LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to get physical device surface capabilities!\nError code: "
                        << static_cast<int32_t>(result);
@@ -1031,7 +1156,7 @@ public:
         和呈现队列闲置（交换链图像被图形队列写入，被呈现队列读取），这么一来计算队列就可以
         在重建交换链时继续其任务
         */
-        VkResult result = vkQueueWaitIdle(queue_graphics);
+        result_t result = vkQueueWaitIdle(queue_graphics);
         // 仅在等待图形队列成功，且图形与呈现所用队列不同时等待呈现队列
         if ((result == VK_SUCCESS) && queue_graphics != queue_presentation)
         {
@@ -1068,9 +1193,126 @@ public:
         swapchainImageViews.resize(0);
 
         // 创建新交换链及与之相关的对象
-        if (VkResult result = CreateSwapchain_Internal()) { return result; }
+        if (result_t result = CreateSwapchain_Internal()) { return result; }
         for (auto& i : callbacks_createSwapchain) { i(); }
         return VK_SUCCESS;
     }
 };
 inline GraphicsBase GraphicsBase::singleton;
+
+/**
+ * @brief 
+ * 
+ */
+class fence {
+    VkFence handle = VK_NULL_HANDLE;
+
+public:
+    // fence() = default;
+    fence(VkFenceCreateInfo& createInfo) { Create(createInfo); }
+    // 默认构造器创建未置位的栅栏
+    fence(VkFenceCreateFlags flags = 0) { Create(flags); }
+    fence(fence&& other) noexcept { MoveHandle; }
+    ~fence() { DestroyHandleBy(vkDestroyFence); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Const Function
+    result_t Wait() const
+    {
+        VkResult result = vkWaitForFences(GraphicsBase::Base().Device(), 1, &handle, false, UINT64_MAX);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ fence ] ERROR\nFailed to wait for the fence!\nError code: "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t Reset() const
+    {
+        VkResult result = vkResetFences(GraphicsBase::Base().Device(), 1, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ fence ] ERROR\nFailed to reset the fence!\nError code: " << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    // 因为“等待后立刻重置”的情形经常出现，定义此函数
+    result_t WaitAndReset() const
+    {
+        VkResult result = Wait();
+        (result != 0) || ((result = Reset()) != 0);
+        /*
+        检擦result的结果，如果是成功（0），则fence需要手动重置
+        否则，不需要重置
+        */
+        return result;
+    }
+    result_t Status() const
+    {
+        VkResult result = vkGetFenceStatus(GraphicsBase::Base().Device(), handle);
+        if (result < 0)  // vkGetFenceStatus(...)成功时有两种结果，所以不能仅仅判断result是否非0
+        {
+            LOG(ERROR) << "[ fence ] ERROR\nFailed to get the status of the fence!\nError code: "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+
+    // Non-const Function
+    result_t Create(VkFenceCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkResult result  = vkCreateFence(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ fence ] ERROR\nFailed to create a fence!\nError code: " << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t Create(VkFenceCreateFlags flags = 0)
+    {
+        VkFenceCreateInfo createInfo = {.flags = flags};
+        return Create(createInfo);
+    }
+};
+
+/**
+ * @brief
+ *
+ */
+class semaphore {
+    VkSemaphore handle = VK_NULL_HANDLE;
+
+public:
+    // semaphore() = default;
+    semaphore(VkSemaphoreCreateInfo& createInfo) { Create(createInfo); }
+    // 默认构造器创建未置位的信号量
+    semaphore(/*VkSemaphoreCreateFlags flags*/) { Create(); }
+    semaphore(semaphore&& other) noexcept { MoveHandle; }
+    ~semaphore() { DestroyHandleBy(vkDestroySemaphore); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Non-const Function
+    result_t Create(VkSemaphoreCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VkResult result  = vkCreateSemaphore(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ semaphore ] ERROR\nFailed to create a semaphore!\nError code: "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t Create(/*VkSemaphoreCreateFlags flags*/)
+    {
+        VkSemaphoreCreateInfo createInfo = {};
+        return Create(createInfo);
+    }
+};
