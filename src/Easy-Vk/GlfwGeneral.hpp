@@ -2,6 +2,8 @@
 #include "EasyVKStart.h"
 #include "VKBase.h"
 
+using namespace vulkan;
+
 // GLFW
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>

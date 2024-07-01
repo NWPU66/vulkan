@@ -6,15 +6,13 @@
 #include <vector>
 #include <vulkan/vulkan_core.h>
 
-constexpr VkExtent2D defaultWindowSize = {1280, 720};  // 全局常量用constexpr修饰定义在类外
-
 /**
  * @brief 定义vulkan命名空间，之后会把Vulkan中一些基本对象的封装写在其中
  *
  */
 namespace vulkan {
 
-};  // namespace vulkan
+constexpr VkExtent2D defaultWindowSize = {1280, 720};  // 全局常量用constexpr修饰定义在类外
 
 #define DestroyHandleBy(Func)                                                                                          \
     if (handle)                                                                                                        \
@@ -196,6 +194,9 @@ private:
     };  // 保存交换链的创建信息以便重建交换链
     std::vector<std::function<void()>> callbacks_createSwapchain;
     std::vector<std::function<void()>> callbacks_destroySwapchain;
+
+    // rendering loop
+    uint32_t currentImageIndex = 0;
 
     // ANCHOR - Private Function
 
@@ -457,6 +458,8 @@ public:
     VkImageView    SwapchainImageView(uint32_t index) const { return swapchainImageViews[index]; }
     uint32_t       SwapchainImageCount() const { return static_cast<uint32_t>(swapchainImages.size()); }
     const VkSwapchainCreateInfoKHR& SwapchainCreateInfo() const { return swapchainCreateInfo; }
+
+    uint32_t CurrentImageIndex() const { return currentImageIndex; }
 
     // ANCHOR - Setter
 
@@ -1197,12 +1200,196 @@ public:
         for (auto& i : callbacks_createSwapchain) { i(); }
         return VK_SUCCESS;
     }
+
+    // ANCHOR - rendering loop
+
+    /**
+     * @brief 用于获取交换链图像索引到currentImageIndex，
+     * 以及在需要重建交换链时调用RecreateSwapchain()、重建交换链后销毁旧交换链
+     */
+    result_t SwapImage(VkSemaphore semaphore_imageIsAvailable)
+    {
+        // 销毁旧交换链（若存在）
+        if ((swapchainCreateInfo.oldSwapchain != nullptr) && swapchainCreateInfo.oldSwapchain != swapchain)
+        {
+            vkDestroySwapchainKHR(device, swapchainCreateInfo.oldSwapchain, nullptr);
+            swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+        }
+        /*
+        如之前在Ch1-4 创建交换链中所说，不能在重建交换链后立刻销毁旧交换链。SwapImage(...)
+        中的逻辑是，若在当前帧重建交换链，那么在下一帧销毁交换链（这也是为什么重建交换链后
+        使用了break来再次执行while，而非递归地调用SwapImage(...)）。
+        */
+
+        // 获取交换链图像索引
+        while (VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, semaphore_imageIsAvailable,
+                                                       VK_NULL_HANDLE, &currentImageIndex))
+        {
+            // 如果result的值为vk_success，会直接退出循环
+            switch (result)
+            {
+                case VK_SUBOPTIMAL_KHR: {
+                    /* REVIEW - 看不懂
+                   返回VK_SUBOPTIMAL_KHR的情况下，信号量可能会被置位，这会导致验证层在第二次
+                   调用vkAcquireNextImageKHR(...)时报错，但并不影响后续执行逻辑：因为是新创建的
+                   交换链图像，不需要等呈现引擎把它吐出来，已经置位的信号量就这么保留置位即可
+                   （要消掉这时的报错，代码改起来很烦，就不改了）。
+                   */
+                }
+                case VK_ERROR_OUT_OF_DATE_KHR: {
+                    if (VkResult result = RecreateSwapchain()) { return result; }
+                    break;  // 注意重建交换链后仍需要获取图像，通过break递归，再次执行while的条件判定语句
+                }
+                default: {
+                    LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to acquire the next image!\nError code: "
+                               << static_cast<int32_t>(result);
+                    return result;
+                }
+            }
+        }
+        return VK_SUCCESS;
+    }
+
+    /**
+     * @brief 用于将命令缓冲区提交到用于图形的队列
+     */
+    result_t SubmitCommandBuffer_Graphics(VkSubmitInfo& submitInfo, VkFence fence = VK_NULL_HANDLE) const
+    {
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        VkResult result  = vkQueueSubmit(queue_graphics, 1, &submitInfo, fence);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to submit the command buffer!\nError code: "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+
+    /**
+     * @brief 用于在渲染循环中将命令缓冲区提交到图形队列的常见情形
+     */
+    result_t SubmitCommandBuffer_Graphics(
+        VkCommandBuffer      commandBuffer,
+        VkSemaphore          semaphore_imageIsAvailable    = VK_NULL_HANDLE,
+        VkSemaphore          semaphore_renderingIsOver     = VK_NULL_HANDLE,
+        VkFence              fence                         = VK_NULL_HANDLE,
+        VkPipelineStageFlags waitDstStage_imageIsAvailable = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT) const
+    {
+        VkSubmitInfo submitInfo = {
+            .commandBufferCount = 1,
+            .pCommandBuffers    = &commandBuffer,
+        };
+        if (semaphore_imageIsAvailable != nullptr)
+        {
+            submitInfo.waitSemaphoreCount = 1;
+            submitInfo.pWaitSemaphores    = &semaphore_imageIsAvailable,
+            submitInfo.pWaitDstStageMask  = &waitDstStage_imageIsAvailable;
+        }
+        if (semaphore_renderingIsOver != nullptr)
+        {
+            submitInfo.signalSemaphoreCount = 1, submitInfo.pSignalSemaphores = &semaphore_renderingIsOver;
+        }
+        return SubmitCommandBuffer_Graphics(submitInfo, fence);
+    }
+
+    /**
+     * @brief 用于将命令缓冲区提交到用于图形的队列，且只使用栅栏的常见情形
+     */
+    result_t SubmitCommandBuffer_Graphics(VkCommandBuffer commandBuffer, VkFence fence = VK_NULL_HANDLE) const
+    {
+        VkSubmitInfo submitInfo = {
+            .commandBufferCount = 1,
+            .pCommandBuffers    = &commandBuffer,
+        };
+        return SubmitCommandBuffer_Graphics(submitInfo, fence);
+    }
+
+    /**
+     * @brief 用于将命令缓冲区提交到用于计算的队列
+     */
+    result_t SubmitCommandBuffer_Compute(VkSubmitInfo& submitInfo, VkFence fence = VK_NULL_HANDLE) const
+    {
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        VkResult result  = vkQueueSubmit(queue_compute, 1, &submitInfo, fence);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to submit the command buffer!\nError code: "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+
+    /**
+     * @brief 用于将命令缓冲区提交到用于计算的队列，且只使用栅栏的常见情形
+     */
+    result_t SubmitCommandBuffer_Compute(VkCommandBuffer commandBuffer, VkFence fence = VK_NULL_HANDLE) const
+    {
+        VkSubmitInfo submitInfo = {.commandBufferCount = 1, .pCommandBuffers = &commandBuffer};
+        return SubmitCommandBuffer_Compute(submitInfo, fence);
+    }
+
+    /*
+    在渲染循环中将命令缓冲区提交到图形队列时，若不需要做深度或模板测试，最迟可以在
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT阶段等待获取到交换链图像，
+    渲染结果在该阶段被写入到交换链图像。
+
+    包含图形命令的命令缓冲区可能不带任何信号量（在渲染循环之外完全有理由这么做），
+    而只包含数据转移命令的话通常也不会带任何信号量（就使用情形而言多是在“加载”这一环节中），
+    数据转移命令可以被提交给图形或计算队列。
+    */
+
+    /**
+     * @brief 用于在渲染循环中呈现图像的常见情形
+     */
+    result_t PresentImage(VkPresentInfoKHR& presentInfo)
+    {
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        switch (VkResult result = vkQueuePresentKHR(queue_presentation, &presentInfo))
+        {
+            case VK_SUCCESS: {
+                return VK_SUCCESS;
+            }
+            case VK_SUBOPTIMAL_KHR: {
+            }
+            case VK_ERROR_OUT_OF_DATE_KHR: {
+                /*
+                跟SwapImage(...)中的情形不同，PresentImage(...)在重建交换链后直接返回，这会导致必定丢1帧。
+                要保留这1帧的话，得在重建交换链后再获取交换链图像、呈现图像，考虑到获取交换链图像时还要
+                创建临时的同步对象，代码会写得比较麻烦，按下不表。
+                */
+                return RecreateSwapchain();
+            }
+            default: {
+                LOG(ERROR) << "[ graphicsBase ] ERROR\nFailed to queue the image for presentation!\nError code: {}\n"
+                           << static_cast<int32_t>(result);
+                return result;
+            }
+        }
+    }
+
+    /**
+     * @brief 用于在渲染循环中呈现图像的常见情形
+     */
+    result_t PresentImage(VkSemaphore semaphore_renderingIsOver = VK_NULL_HANDLE)
+    {
+        VkPresentInfoKHR presentInfo = {
+            .swapchainCount = 1,
+            .pSwapchains    = &swapchain,
+            .pImageIndices  = &currentImageIndex,
+        };
+        if (semaphore_renderingIsOver != nullptr)
+        {
+            presentInfo.waitSemaphoreCount = 1;
+            presentInfo.pWaitSemaphores    = &semaphore_renderingIsOver;
+        }
+        return PresentImage(presentInfo);
+    }
 };
 inline GraphicsBase GraphicsBase::singleton;
 
 /**
- * @brief 
- * 
+ * @brief
+ *
  */
 class fence {
     VkFence handle = VK_NULL_HANDLE;
@@ -1316,3 +1503,227 @@ public:
         return Create(createInfo);
     }
 };
+
+/**
+ * @brief
+ *
+ */
+class commandBuffer {
+    friend class commandPool;  // 封装命令池的commandPool类负责分配和释放命令缓冲区，需要让其能访问私有成员handle
+    VkCommandBuffer handle = VK_NULL_HANDLE;
+
+public:
+    commandBuffer() = default;
+    commandBuffer(commandBuffer&& other) noexcept { MoveHandle; }
+    // 因释放命令缓冲区的函数被我定义在封装命令池的commandPool类中，没析构器
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Const Function
+    // 这里没给inheritanceInfo设定默认参数，因为C++标准中规定对空指针解引用是未定义行为（尽管运行期不必发生，且至少MSVC编译器允许这种代码），而我又一定要传引用而非指针，因而形成了两个Begin(...)
+    result_t Begin(VkCommandBufferUsageFlags usageFlags, VkCommandBufferInheritanceInfo& inheritanceInfo) const
+    {
+        inheritanceInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+        VkCommandBufferBeginInfo beginInfo = {
+            .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags            = usageFlags,
+            .pInheritanceInfo = &inheritanceInfo,
+        };
+        VkResult result = vkBeginCommandBuffer(handle, &beginInfo);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ commandBuffer ] ERROR\nFailed to begin a command buffer!\nError code: {} "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t Begin(VkCommandBufferUsageFlags usageFlags = 0) const
+    {
+        VkCommandBufferBeginInfo beginInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = usageFlags,
+        };
+        VkResult result = vkBeginCommandBuffer(handle, &beginInfo);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ commandBuffer ] ERROR\nFailed to begin a command buffer!\nError code: {} "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t End() const
+    {
+        VkResult result = vkEndCommandBuffer(handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ commandBuffer ] ERROR\nFailed to end a command buffer!\nError code: {} "
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+};
+
+/**
+ * @brief
+ *
+ */
+class commandPool {
+    VkCommandPool handle = VK_NULL_HANDLE;
+
+public:
+    commandPool() = default;
+    commandPool(VkCommandPoolCreateInfo& createInfo) { Create(createInfo); }
+    commandPool(uint32_t queueFamilyIndex, VkCommandPoolCreateFlags flags = 0) { Create(queueFamilyIndex, flags); }
+    commandPool(commandPool&& other) noexcept { MoveHandle; }
+    ~commandPool() { DestroyHandleBy(vkDestroyCommandPool); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Const Function
+    result_t AllocateBuffers(arrayRef<VkCommandBuffer> buffers,
+                             VkCommandBufferLevel      level = VK_COMMAND_BUFFER_LEVEL_PRIMARY) const
+    {
+        VkCommandBufferAllocateInfo allocateInfo = {.sType       = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                                    .commandPool = handle,
+                                                    .level       = level,
+                                                    .commandBufferCount = static_cast<uint32_t>(buffers.Count())};
+        VkResult result = vkAllocateCommandBuffers(GraphicsBase::Base().Device(), &allocateInfo, buffers.Pointer());
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ commandPool ] ERROR\nFailed to allocate command buffers!\nError code: {}\n"
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t AllocateBuffers(arrayRef<commandBuffer> buffers,
+                             VkCommandBufferLevel    level = VK_COMMAND_BUFFER_LEVEL_PRIMARY) const
+    {
+        return AllocateBuffers({&buffers[0].handle, buffers.Count()}, level);
+    }
+    void FreeBuffers(arrayRef<VkCommandBuffer> buffers) const
+    {
+        vkFreeCommandBuffers(GraphicsBase::Base().Device(), handle, buffers.Count(), buffers.Pointer());
+        memset(buffers.Pointer(), 0, buffers.Count() * sizeof(VkCommandBuffer));
+    }
+    void FreeBuffers(arrayRef<commandBuffer> buffers) const { FreeBuffers({&buffers[0].handle, buffers.Count()}); }
+    /*
+    arrayRef<commandBuffer> buffers这个类型的复制构造很省资源，各种构造都挺省的
+    */
+
+    // Non-const Function
+    result_t Create(VkCommandPoolCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        VkResult result  = vkCreateCommandPool(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ commandPool ] ERROR\nFailed to create a command pool!\nError code: " << int32_t(result)
+                       << "\n";
+        }
+        return result;
+    }
+    result_t Create(uint32_t queueFamilyIndex, VkCommandPoolCreateFlags flags = 0)
+    {
+        VkCommandPoolCreateInfo createInfo = {.flags = flags, .queueFamilyIndex = queueFamilyIndex};
+        return Create(createInfo);
+    }
+};
+
+/**
+ * @brief
+ *
+ */
+class renderPass {
+    VkRenderPass handle = VK_NULL_HANDLE;
+
+public:
+    renderPass() = default;
+    renderPass(VkRenderPassCreateInfo& createInfo) { Create(createInfo); }
+    renderPass(renderPass&& other) noexcept { MoveHandle; }
+    ~renderPass() { DestroyHandleBy(vkDestroyRenderPass); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Const Function
+    void CmdBegin(VkCommandBuffer        commandBuffer,
+                  VkRenderPassBeginInfo& beginInfo,
+                  VkSubpassContents      subpassContents = VK_SUBPASS_CONTENTS_INLINE) const
+    {
+        beginInfo.sType      = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        beginInfo.renderPass = handle;
+        vkCmdBeginRenderPass(commandBuffer, &beginInfo, subpassContents);
+    }
+    void CmdBegin(VkCommandBuffer              commandBuffer,
+                  VkFramebuffer                framebuffer,
+                  VkRect2D                     renderArea,
+                  arrayRef<const VkClearValue> clearValues     = {},
+                  VkSubpassContents            subpassContents = VK_SUBPASS_CONTENTS_INLINE) const
+    {
+        VkRenderPassBeginInfo beginInfo = {
+            .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass      = handle,
+            .framebuffer     = framebuffer,
+            .renderArea      = renderArea,
+            .clearValueCount = uint32_t(clearValues.Count()),
+            .pClearValues    = clearValues.Pointer(),
+        };
+        vkCmdBeginRenderPass(commandBuffer, &beginInfo, subpassContents);
+    }
+    void CmdNext(VkCommandBuffer commandBuffer, VkSubpassContents subpassContents = VK_SUBPASS_CONTENTS_INLINE) const
+    {
+        vkCmdNextSubpass(commandBuffer, subpassContents);
+    }
+    void CmdEnd(VkCommandBuffer commandBuffer) const { vkCmdEndRenderPass(commandBuffer); }
+
+    // Non-const Function
+    result_t Create(VkRenderPassCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        VkResult result  = vkCreateRenderPass(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ renderPass ] ERROR\nFailed to create a render pass!\nError code: {}\n"
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+};
+
+/**
+ * @brief
+ *
+ */
+class framebuffer {
+    VkFramebuffer handle = VK_NULL_HANDLE;
+
+public:
+    framebuffer() = default;
+    framebuffer(VkFramebufferCreateInfo& createInfo) { Create(createInfo); }
+    framebuffer(framebuffer&& other) noexcept { MoveHandle; }
+    ~framebuffer() { DestroyHandleBy(vkDestroyFramebuffer); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Non-const Function
+    result_t Create(VkFramebufferCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        VkResult result  = vkCreateFramebuffer(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ framebuffer ] ERROR\nFailed to create a framebuffer!\nError code: {}\n",
+                static_cast<int32_t>(result);
+        }
+        return result;
+    }
+};
+
+};  // namespace vulkan

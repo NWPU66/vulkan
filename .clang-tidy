@@ -10,4 +10,5 @@ Checks: >
   google-*,
 
   -modernize-use-trailing-return-type,
-  -modernize-use-nodiscard
+  -modernize-use-nodiscard,
+  -bugprone-easily-swappable-parameters
