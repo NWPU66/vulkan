@@ -6,12 +6,18 @@ const VkExtent2D& windowSize = GraphicsBase::Base().SwapchainCreateInfo().imageE
 
 namespace easyVulkan {
 
+/**
+ * @brief 渲染通道与帧缓冲
+ */
 struct renderPassWithFramebuffers
 {
     renderPass               renderPass;
     std::vector<framebuffer> framebuffers;
 };
 
+/**
+ * @brief 创建渲染通道与帧缓冲
+ */
 const auto& CreateRpwf_Screen()
 {
     static renderPassWithFramebuffers rpwf;
@@ -68,22 +74,34 @@ const auto& CreateRpwf_Screen()
     };
     rpwf.renderPass.Create(renderPassCreateInfo);
 
-    // 创建帧缓冲
-    rpwf.framebuffers.resize(GraphicsBase::Base().SwapchainImageCount());
-    VkFramebufferCreateInfo framebufferCreateInfo = {
-        .renderPass      = rpwf.renderPass,
-        .attachmentCount = 1,
-        .width           = windowSize.width,
-        .height          = windowSize.height,
-        .layers          = 1,
+    /* 创建帧缓冲
+    由于帧缓冲的大小与交换链图像相关，重建交换链时也会需要重建帧缓冲，
+    于是将创建和销毁帧缓冲的代码扔进各自的lambda表达式，以用作回调函数
+    */
+    std::function<void()> CreateFramebuffers = []() {
+        rpwf.framebuffers.resize(GraphicsBase::Base().SwapchainImageCount());
+        VkFramebufferCreateInfo framebufferCreateInfo = {
+            .renderPass      = rpwf.renderPass,
+            .attachmentCount = 1,
+            .width           = windowSize.width,
+            .height          = windowSize.height,
+            .layers          = 1,
+        };
+        for (size_t i = 0; i < GraphicsBase::Base().SwapchainImageCount(); i++)
+        {
+            VkImageView attachment             = GraphicsBase::Base().SwapchainImageView(i);
+            framebufferCreateInfo.pAttachments = &attachment;
+            rpwf.framebuffers[i].Create(framebufferCreateInfo);
+        }
     };
-    for (size_t i = 0; i < GraphicsBase::Base().SwapchainImageCount(); i++)
-    {
-        VkImageView attachment             = GraphicsBase::Base().SwapchainImageView(i);
-        framebufferCreateInfo.pAttachments = &attachment;
-        rpwf.framebuffers[i].Create(framebufferCreateInfo);
-    }
+    std::function<void()> DestroyFramebuffers = []() {
+        rpwf.framebuffers.clear();  // 清空vector中的元素时会逐一执行析构函数
+    };
+    CreateFramebuffers();
 
+    ExecuteOnce(rpwf);  // 防止再次调用本函数时，重复添加回调函数
+    GraphicsBase::Base().AddCallback_CreateSwapchain(CreateFramebuffers);
+    GraphicsBase::Base().AddCallback_DestroySwapchain(DestroyFramebuffers);
     return rpwf;
 }
 

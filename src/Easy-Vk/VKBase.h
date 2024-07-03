@@ -292,7 +292,7 @@ private:
             auto supportCompute = static_cast<VkBool32>(
                 enableComputeQueue && ((queueFamilyPropertieses[i].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0U));
 
-            VkBool32 supportPresentation = 0U;
+            VkBool32 supportPresentation = VK_FALSE;
             if (surface != nullptr)
             {
                 if (result_t result =
@@ -1721,6 +1721,156 @@ public:
         {
             LOG(ERROR) << "[ framebuffer ] ERROR\nFailed to create a framebuffer!\nError code: {}\n",
                 static_cast<int32_t>(result);
+        }
+        return result;
+    }
+};
+
+/**
+ * @brief 着色器模块
+ */
+class shaderModule {
+    VkShaderModule handle = VK_NULL_HANDLE;
+
+public:
+    shaderModule() = default;
+    shaderModule(VkShaderModuleCreateInfo& createInfo) { Create(createInfo); }
+    shaderModule(const char* filepath /*VkShaderModuleCreateFlags flags*/) { Create(filepath); }
+    shaderModule(size_t codeSize, const uint32_t* pCode /*VkShaderModuleCreateFlags flags*/)
+    {
+        Create(codeSize, pCode);
+    }
+    shaderModule(shaderModule&& other) noexcept { MoveHandle; }
+    ~shaderModule() { DestroyHandleBy(vkDestroyShaderModule); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Const Function
+    VkPipelineShaderStageCreateInfo StageCreateInfo(VkShaderStageFlagBits stage, const char* entry = "main") const
+    {
+        return {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,  // sType
+            nullptr,                                              // pNext
+            0,                                                    // flags
+            stage,                                                // stage
+            handle,                                               // module
+            entry,                                                // pName
+            nullptr                                               // pSpecializationInfo
+        };
+    }
+    // Non-const Function
+    result_t Create(VkShaderModuleCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        VkResult result  = vkCreateShaderModule(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ shader ] ERROR\nFailed to create a shader module!\nError code: {}\n" << int32_t(result);
+        }
+        return result;
+    }
+    result_t Create(const char* filepath /*VkShaderModuleCreateFlags flags*/)
+    {
+        std::ifstream file(filepath, std::ios::ate | std::ios::binary);
+        if (!file)
+        {
+            LOG(ERROR) << "[ shader ] ERROR\nFailed to open the file: {}\n" << filepath;
+            return VK_RESULT_MAX_ENUM;  // 没有合适的错误代码，别用VK_ERROR_UNKNOWN
+        }
+        size_t                fileSize = static_cast<size_t>(file.tellg());
+        std::vector<uint32_t> binaries(fileSize / 4);
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(binaries.data()), fileSize);
+        file.close();
+        return Create(fileSize, binaries.data());
+    }
+    result_t Create(size_t codeSize, const uint32_t* pCode /*VkShaderModuleCreateFlags flags*/)
+    {
+        VkShaderModuleCreateInfo createInfo = {.codeSize = codeSize, .pCode = pCode};
+        return Create(createInfo);
+    }
+};
+
+/**
+ * @brief 反转矩阵的y方向
+ * @note 之前已经定义了GLM_FORCE_DEPTH_ZERO_TO_ONE来指定深度范围为[ 0, 1]。
+ * GLM生成的投影矩阵适用于OpenGL，但对于Vulkan程序还需要解决+y方向问题，
+ */
+inline glm::mat4 FlipVertical(const glm::mat4& projection)
+{
+    glm::mat4 _projection = projection;
+    for (uint32_t i = 0; i < 4; i++) { _projection[i][1] *= -1; }
+    return _projection;
+}
+
+/**
+ * @brief 管线布局
+ */
+class pipelineLayout {
+    VkPipelineLayout handle = VK_NULL_HANDLE;
+
+public:
+    pipelineLayout() = default;
+    pipelineLayout(VkPipelineLayoutCreateInfo& createInfo) { Create(createInfo); }
+    pipelineLayout(pipelineLayout&& other) noexcept { MoveHandle; }
+    ~pipelineLayout() { DestroyHandleBy(vkDestroyPipelineLayout); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Non-const Function
+    result_t Create(VkPipelineLayoutCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        VkResult result  = vkCreatePipelineLayout(GraphicsBase::Base().Device(), &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ pipelineLayout ] ERROR\nFailed to create a pipeline layout!\nError code: {}\n"
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+};
+
+class pipeline {
+    VkPipeline handle = VK_NULL_HANDLE;
+
+public:
+    pipeline() = default;
+    pipeline(VkGraphicsPipelineCreateInfo& createInfo) { Create(createInfo); }
+    pipeline(VkComputePipelineCreateInfo& createInfo) { Create(createInfo); }
+    pipeline(pipeline&& other) noexcept { MoveHandle; }
+    ~pipeline() { DestroyHandleBy(vkDestroyPipeline); }
+
+    // Getter
+    DefineHandleTypeOperator;
+    DefineAddressFunction;
+
+    // Non-const Function
+    result_t Create(VkGraphicsPipelineCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        VkResult result =
+            vkCreateGraphicsPipelines(GraphicsBase::Base().Device(), VK_NULL_HANDLE, 1, &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ pipeline ] ERROR\nFailed to create a graphics pipeline!\nError code: {}\n"
+                       << static_cast<int32_t>(result);
+        }
+        return result;
+    }
+    result_t Create(VkComputePipelineCreateInfo& createInfo)
+    {
+        createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        VkResult result =
+            vkCreateComputePipelines(GraphicsBase::Base().Device(), VK_NULL_HANDLE, 1, &createInfo, nullptr, &handle);
+        if (result != 0)
+        {
+            LOG(ERROR) << "[ pipeline ] ERROR\nFailed to create a compute pipeline!\nError code: {}\n"
+                       << static_cast<int32_t>(result);
         }
         return result;
     }

@@ -26,10 +26,10 @@ target_link_libraries(easy_vk PRIVATE
 #     $<TARGET_FILE_DIR:easy_vk>)
 
 # 移动./shader整个目录到编译目录下
-# add_custom_command(TARGET easy_vk POST_BUILD
-#     COMMAND ${CMAKE_COMMAND} -E copy_directory
-#     "${CMAKE_CURRENT_SOURCE_DIR}/shader"
-#     $<TARGET_FILE_DIR:easy_vk>/shader)
+add_custom_command(TARGET easy_vk POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/shader"
+    $<TARGET_FILE_DIR:easy_vk>/shader)
 install(TARGETS easy_vk 
     RUNTIME DESTINATION ./demo
     LIBRARY DESTINATION ./demo
