@@ -55,10 +55,11 @@ std::vector<VkImage>     swapChain_images;
 std::vector<VkImageView> swapChain_imageViews;
 
 // ANCHOR - vulkan pipeline object
-VkCommandPool   commandPool   = nullptr;
-VkCommandBuffer commandBuffer = nullptr;
-VkRenderPass    renderPass    = nullptr;
-VkPipeline      pipeline      = nullptr;
+VkCommandPool    commandPool    = nullptr;
+VkCommandBuffer  commandBuffer  = nullptr;
+VkRenderPass     renderPass     = nullptr;
+VkPipelineLayout pipelineLayout = nullptr;
+VkPipeline       pipeline       = nullptr;
 
 int main(int argc, char** argv)
 {
@@ -387,6 +388,8 @@ int main(int argc, char** argv)
             };
             Result_T(vkCreateRenderPass(device, &renderPass_createInfo, nullptr, &renderPass));
 
+            // ANCHOR - create frame buffers
+
             // ANCHOR - create graphics pipeline
             // 创建着色器阶段
             std::function<VkShaderModule(std::shared_ptr<std::vector<char>>)> createShaderModule =
@@ -402,11 +405,27 @@ int main(int argc, char** argv)
                     vkCreateShaderModule(device, &shaderModule_createInfo, nullptr, &shaderModule);
                     return shaderModule;
                 };
-            std::array<VkShaderModule, 2> shaderStages = {
-                createShaderModule(readFile("")),  // vertex shader
-                createShaderModule(readFile("")),  // fragment shader
-            };
+            VkShaderModule vertexShader_module   = createShaderModule(readFile(""));
+            VkShaderModule fragmentShader_module = createShaderModule(readFile(""));
             // LINK -
+            std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages_createInfo{
+                VkPipelineShaderStageCreateInfo{
+                    .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext  = nullptr,
+                    .flags  = 0,
+                    .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+                    .module = vertexShader_module,
+                    .pName  = "main",
+                },
+                VkPipelineShaderStageCreateInfo{
+                    .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext  = nullptr,
+                    .flags  = 0,
+                    .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .module = fragmentShader_module,
+                    .pName  = "main",
+                },
+            };
 
             // 顶点输入
             VkPipelineVertexInputStateCreateInfo vertexInputState_createInfo{
@@ -468,6 +487,7 @@ int main(int argc, char** argv)
                 .lineWidth               = 1.0F,
             };
 
+            // 多重采样
             VkPipelineMultisampleStateCreateInfo multisampleState_createInfo{
                 .sType                 = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                 .pNext                 = nullptr,
@@ -480,22 +500,82 @@ int main(int argc, char** argv)
                 .alphaToOneEnable      = VK_FALSE,
             };
 
+            // 深度、模板缓冲
+            VkPipelineDepthStencilStateCreateInfo depthStencilState_createInfo{
+                .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                .pNext                 = nullptr,
+                .flags                 = 0,
+                .depthTestEnable       = VK_FALSE,
+                .depthWriteEnable      = VK_FALSE,
+                .depthCompareOp        = VK_COMPARE_OP_LESS,
+                .depthBoundsTestEnable = VK_FALSE,
+                .stencilTestEnable     = VK_FALSE,
+                .front                 = {},
+                .back                  = {},
+                .minDepthBounds        = 0.0F,
+                .maxDepthBounds        = 1.0F,
+            };
+
+            // 颜色混合
+            VkPipelineColorBlendAttachmentState colorBlendAttachmentState{
+                .blendEnable         = VK_FALSE,
+                .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+                .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+                .colorBlendOp        = VK_BLEND_OP_ADD,
+                .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+                .alphaBlendOp        = VK_BLEND_OP_ADD,
+                .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                                  VK_COLOR_COMPONENT_A_BIT,
+            };
+            VkPipelineColorBlendStateCreateInfo colorBlendState_createInfo{
+                .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                .pNext           = nullptr,
+                .flags           = 0,
+                .logicOpEnable   = VK_FALSE,
+                .logicOp         = VK_LOGIC_OP_COPY,
+                .attachmentCount = 1,
+                .pAttachments    = &colorBlendAttachmentState,
+                .blendConstants  = {0.0F, 0.0F, 0.0F, 0.0F},
+            };
+
+            // 动态状态
+            VkPipelineDynamicStateCreateInfo dynamicState_createInfo{
+                .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                .pNext             = nullptr,
+                .flags             = 0,
+                .dynamicStateCount = 0,
+                .pDynamicStates    = nullptr,
+            };
+
+            // 管线布局
+            VkPipelineLayoutCreateInfo pipelineLayout_createInfo{
+                .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                .pNext                  = nullptr,
+                .flags                  = 0,
+                .setLayoutCount         = 0,
+                .pSetLayouts            = nullptr,
+                .pushConstantRangeCount = 0,
+                .pPushConstantRanges    = nullptr,
+            };
+            Result_T(vkCreatePipelineLayout(device, &pipelineLayout_createInfo, nullptr, &pipelineLayout));
+
             VkGraphicsPipelineCreateInfo graphicsPipeline_createInfo{
                 .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                 .pNext               = nullptr,
                 .flags               = 0,
-                .stageCount          = shaderStages.size(),
-                .pStages             = shaderStages.data(),
+                .stageCount          = shaderStages_createInfo.size(),
+                .pStages             = shaderStages_createInfo.data(),
                 .pVertexInputState   = &vertexInputState_createInfo,
                 .pInputAssemblyState = &inputAssemblyState_createInfo,
                 .pTessellationState  = nullptr,
                 .pViewportState      = &viewportState_createInfo,
                 .pRasterizationState = &rasterizationState_createInfo,
                 .pMultisampleState   = &multisampleState_createInfo,
-                .pDepthStencilState  =,  //
-                .pColorBlendState    =,  //
-                .pDynamicState       =,  //
-                .layout              =,  //
+                .pDepthStencilState  = &depthStencilState_createInfo,
+                .pColorBlendState    = &colorBlendState_createInfo,
+                .pDynamicState       = &dynamicState_createInfo,
+                .layout              = pipelineLayout,
                 .renderPass          = renderPass,
                 .subpass             = 0,
                 .basePipelineHandle  = nullptr,
@@ -507,14 +587,27 @@ int main(int argc, char** argv)
 
         // ANCHOR - rendering loop
         {
+            while (glfwWindowShouldClose(window) == 0)
+            {
+                // draw
+
+                glfwPollEvents();
+            }
+
+            vkDeviceWaitIdle(device);
         }
 
         // SECTION - cleanup
         //  ANCHOR - cleanup vulkan
         {
-            //
+            // pipeline
+            vkDestroyPipeline(device, pipeline, nullptr);
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            vkDestroyRenderPass(device, renderPass, nullptr);
+            vkDestroyCommandPool(device, commandPool,
+                                 nullptr);  // commandPool被销毁时，所有的command buffer会被自动释放
 
-            //
+            // basic componment
             for (auto& imageView : swapChain_imageViews) { vkDestroyImageView(device, imageView, nullptr); }
             vkDestroySwapchainKHR(device, swapChain, nullptr);
             vkDestroyDevice(device, nullptr);
