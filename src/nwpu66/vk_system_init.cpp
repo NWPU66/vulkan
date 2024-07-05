@@ -58,8 +58,21 @@ std::vector<VkImageView> swapChain_imageViews;
 VkCommandPool    commandPool    = nullptr;
 VkCommandBuffer  commandBuffer  = nullptr;
 VkRenderPass     renderPass     = nullptr;
+VkFramebuffer    frameBuffer    = nullptr;
 VkPipelineLayout pipelineLayout = nullptr;
 VkPipeline       pipeline       = nullptr;
+
+// ANCHOR - 创建顶点数据
+static const std::vector<float> vertex_position = {
+    // 1st triangle
+    -0.5F, -0.5F, 0.0F,  //
+    0.5F, -0.5F, 0.0F,   //
+    -0.5F, 0.5F, 0.0F,   //
+    // 2nd triangle
+    -0.5F, 0.5F, 0.0F,  //
+    0.5F, -0.5F, 0.0F,  //
+    0.5F, 0.5F, 0.0F,   //
+};
 
 int main(int argc, char** argv)
 {
@@ -389,6 +402,19 @@ int main(int argc, char** argv)
             Result_T(vkCreateRenderPass(device, &renderPass_createInfo, nullptr, &renderPass));
 
             // ANCHOR - create frame buffers
+            std::array<VkImageView, 1> attachments = {swapChain_imageViews[0]};
+            VkFramebufferCreateInfo    frameBuffer_createInfo{
+                   .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                   .pNext           = nullptr,
+                   .flags           = 0,
+                   .renderPass      = renderPass,
+                   .attachmentCount = static_cast<uint32_t>(attachments.size()),
+                   .pAttachments    = attachments.data(),
+                   .width           = surface_capabilities.currentExtent.width,
+                   .height          = surface_capabilities.currentExtent.height,
+                   .layers          = 1,
+            };
+            Result_T(vkCreateFramebuffer(device, &frameBuffer_createInfo, nullptr, &frameBuffer));
 
             // ANCHOR - create graphics pipeline
             // 创建着色器阶段
@@ -402,7 +428,7 @@ int main(int argc, char** argv)
                         .codeSize = code->size(),
                         .pCode    = reinterpret_cast<const uint32_t*>(code->data()),
                     };
-                    vkCreateShaderModule(device, &shaderModule_createInfo, nullptr, &shaderModule);
+                    Result_T(vkCreateShaderModule(device, &shaderModule_createInfo, nullptr, &shaderModule));
                     return shaderModule;
                 };
             VkShaderModule vertexShader_module   = createShaderModule(readFile(""));
@@ -428,14 +454,25 @@ int main(int argc, char** argv)
             };
 
             // 顶点输入
+            VkVertexInputBindingDescription vertexBindingDescription{
+                .binding   = 0,
+                .stride    = sizeof(float) * 3,
+                .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+            };
+            VkVertexInputAttributeDescription vertexAttributeDescription{
+                .location = 0,
+                .binding  = 0,
+                .format   = VK_FORMAT_R32G32B32_SFLOAT,
+                .offset   = 0,
+            };
             VkPipelineVertexInputStateCreateInfo vertexInputState_createInfo{
                 .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
                 .pNext                           = nullptr,
                 .flags                           = 0,
-                .vertexBindingDescriptionCount   = 0,
-                .pVertexBindingDescriptions      = nullptr,
-                .vertexAttributeDescriptionCount = 0,
-                .pVertexAttributeDescriptions    = nullptr,
+                .vertexBindingDescriptionCount   = 1,
+                .pVertexBindingDescriptions      = &vertexBindingDescription,
+                .vertexAttributeDescriptionCount = 1,
+                .pVertexAttributeDescriptions    = &vertexAttributeDescription,
             };
 
             // 输入装配
@@ -586,10 +623,102 @@ int main(int argc, char** argv)
         //~SECTION
 
         // ANCHOR - rendering loop
+        // 创建信号量和栅栏
+        VkSemaphore semaphore_imageAvailable = nullptr;
+        VkSemaphore semaphore_renderFinished = nullptr;
+        VkFence     fence_inFlight           = nullptr;
+        {
+            VkSemaphoreCreateInfo semaphore_createInfo{
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+            };
+            VkFenceCreateInfo fence_createInfo{
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+            };
+            Result_T(vkCreateSemaphore(device, &semaphore_createInfo, nullptr, &semaphore_imageAvailable));
+            Result_T(vkCreateSemaphore(device, &semaphore_createInfo, nullptr, &semaphore_renderFinished));
+            Result_T(vkCreateFence(device, &fence_createInfo, nullptr, &fence_inFlight));
+        }
+        // 渲染循环
         {
             while (glfwWindowShouldClose(window) == 0)
             {
-                // draw
+                // 等待fence
+                Result_T(vkWaitForFences(device, 1, &fence_inFlight, VK_TRUE, std::numeric_limits<uint64_t>::max()));
+                Result_T(vkResetFences(device, 1, &fence_inFlight));
+
+                // 从交换链中获取图像
+                uint32_t image_id = 0;
+                Result_T(vkAcquireNextImageKHR(device, swapChain, std::numeric_limits<uint64_t>::max(),
+                                               semaphore_imageAvailable, VK_NULL_HANDLE, &image_id));
+
+                // 向缓冲中填写渲染指令
+                {
+                    // 启动指令缓冲
+                    VkCommandBufferBeginInfo commandBuffer_beginInfo{
+                        .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                        .pNext            = nullptr,
+                        .flags            = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,  // 执行后清空
+                        .pInheritanceInfo = nullptr,
+                    };
+                    Result_T(vkBeginCommandBuffer(commandBuffer, &commandBuffer_beginInfo));
+
+                    // 启动渲染通道
+                    VkClearValue          clear_color = {0.5F, 0.5F, 0.5F, 1.0F};
+                    VkRenderPassBeginInfo renderPass_beginInfo{
+                        .sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                        .pNext       = nullptr,
+                        .renderPass  = renderPass,
+                        .framebuffer = frameBuffer,
+                        .renderArea =
+                            VkRect2D{
+                                .offset = {0, 0},
+                                .extent = surface_capabilities.currentExtent,
+                            },
+                        .clearValueCount = 1,
+                        .pClearValues    = &clear_color,
+                    };
+                    vkCmdBeginRenderPass(commandBuffer, &renderPass_beginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+                    // 绑定图形管线
+                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+                    // 渲染！
+                    // TODO - 绑定输入顶点
+                    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+                    // 结束渲染通道与指令缓冲
+                    vkCmdEndRenderPass(commandBuffer);
+                    Result_T(vkEndCommandBuffer(commandBuffer));
+                }
+
+                // 提交指令
+                VkPipelineStageFlags stageFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                VkSubmitInfo         submitInfo{
+                            .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                            .pNext                = nullptr,
+                            .waitSemaphoreCount   = 1,
+                            .pWaitSemaphores      = &semaphore_imageAvailable,
+                            .pWaitDstStageMask    = &stageFlags,
+                            .commandBufferCount   = 1,
+                            .pCommandBuffers      = &commandBuffer,
+                            .signalSemaphoreCount = 1,
+                            .pSignalSemaphores    = &semaphore_renderFinished,
+                };
+                Result_T(vkQueueSubmit(queueFamilies.graphics_handle, 1, &submitInfo, fence_inFlight));
+
+                // 呈现图像
+                VkPresentInfoKHR presentInfo{
+                    .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                    .pNext              = nullptr,
+                    .waitSemaphoreCount = 1,
+                    .pWaitSemaphores    = &semaphore_renderFinished,
+                    .swapchainCount     = 1,
+                    .pSwapchains        = &swapChain,
+                    .pImageIndices      = &image_id,
+                    .pResults           = nullptr,
+                };
+                Result_T(vkQueuePresentKHR(queueFamilies.graphics_handle, &presentInfo));
 
                 glfwPollEvents();
             }

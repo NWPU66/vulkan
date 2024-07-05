@@ -1230,6 +1230,8 @@ public:
             {
                 case VK_SUBOPTIMAL_KHR: {
                     /* REVIEW - 看不懂
+                    返回VK_SUBOPTIMAL_KHR也算获取成功
+                    
                    返回VK_SUBOPTIMAL_KHR的情况下，信号量可能会被置位，这会导致验证层在第二次
                    调用vkAcquireNextImageKHR(...)时报错，但并不影响后续执行逻辑：因为是新创建的
                    交换链图像，不需要等呈现引擎把它吐出来，已经置位的信号量就这么保留置位即可

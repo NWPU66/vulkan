@@ -15,6 +15,7 @@
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>  //GLFW库会自动包含Vulkan库的头文件
+#include <glm/glm.hpp>
 #include <glog/logging.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -32,6 +33,18 @@ static const bool enableValidationLayers = true;
 static const std::vector<const char*> validationLayers                  = {"VK_LAYER_KHRONOS_validation"};
 static const std::vector<const char*> deviceExtensions                  = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 static const bool                     print_avalibale_vulkan_extensions = false;
+
+// vertex inputs
+struct Vertex
+{
+    glm::vec2 pos;
+    glm::vec3 color;
+};
+static const std::vector<Vertex> vertices = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},  //
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},   //
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},  //
+};  // 交叉顶点属性(interleaving vertex attributes)
 
 static std::shared_ptr<std::vector<char>> readFile(const std::string& filename)
 {
@@ -63,10 +76,7 @@ private:
         int graphicsFamily = -1;
         int presentFamily  = -1;
 
-        [[nodiscard]] bool isComplete() const
-        {
-            return graphicsFamily >= 0 && presentFamily >= 0;
-        }
+        [[nodiscard]] bool isComplete() const { return graphicsFamily >= 0 && presentFamily >= 0; }
     };
 
     struct SwapChainSupportDetails
@@ -107,14 +117,20 @@ private:
     std::vector<VkSemaphore> imageAvailableSemaphores;  // 为每一帧创建信号量
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;  // CPU和GPU的同步，防止有超过最大并行数帧的指令同时被提交执行
-    size_t currentFrame = 0;              // 当前帧应该使用的信号量
+    size_t         currentFrame       = 0;  // 当前帧应该使用的信号量
+    bool           framebufferResized = false;
+    VkBuffer       vertexBuffer;
+    VkDeviceMemory vertexBufferMemory;
 
     void initWindow()
     {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // 阻止GLFW它创建OpenGL上下文
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);    // 禁止窗口大小改变
+        // glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);    // 禁止窗口大小改变
         window = glfwCreateWindow(screen_width, screen_height, "hello_triangle", nullptr, nullptr);
+
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
 
     void initVulkan()
@@ -133,6 +149,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
+        createVertexBuffer();
         createCommandBuffers();
 
         createSemaphores();
@@ -159,6 +176,8 @@ private:
     void cleanup()
     {
         // ANCHOR -  cleanup Vulkan
+        vkDestroyBuffer(device, vertexBuffer, nullptr);  // 清除缓冲区
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
         // 清除所有信号量
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
@@ -166,8 +185,11 @@ private:
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
-        vkDestroyCommandPool(device, commandPool, nullptr);
+
         cleanupSwapChain();  // 清理交换链
+
+        vkDestroyCommandPool(device, commandPool, nullptr);
+
         vkDestroyDevice(device, nullptr);
         if (enableValidationLayers)  // 清除VK校验层
         {
@@ -216,10 +238,7 @@ private:
             std::vector<VkExtensionProperties> extensions(extensionCount);
             vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
             LOG(INFO) << "available extensions:";
-            for (const auto& extension : extensions)
-            {
-                LOG(INFO) << "\t" << extension.extensionName;
-            }
+            for (const auto& extension : extensions) { LOG(INFO) << "\t" << extension.extensionName; }
         }
 
         /** NOTE - 全局扩展以及，校验层所需的扩展
@@ -513,10 +532,7 @@ private:
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
 
         std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
-        for (const auto& extension : availableExtensions)
-        {
-            requiredExtensions.erase(extension.extensionName);
-        }
+        for (const auto& extension : availableExtensions) { requiredExtensions.erase(extension.extensionName); }
 
         return requiredExtensions.empty();
     }
@@ -954,14 +970,33 @@ private:
         // 顶点输入：描述传递给顶点着色器的顶点数据格式
         //        绑定：数据之间的间距和数据是按逐顶点的方式还是按逐实例的方式进行组织
         //        属性描述：传递给顶点着色器的属性类型，用于将属性绑定到顶点着色器中的变量
+        VkVertexInputBindingDescription vertexBindingDescription{
+            .binding   = 0,
+            .stride    = sizeof(Vertex),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+        std::array<VkVertexInputAttributeDescription, 2> vertexAttributeDescriptions = {
+            VkVertexInputAttributeDescription{
+                .location = 0,
+                .binding  = 0,
+                .format   = VK_FORMAT_R32G32B32_SFLOAT,
+                .offset   = offsetof(Vertex, pos),
+            },
+            VkVertexInputAttributeDescription{
+                .location = 1,
+                .binding  = 0,
+                .format   = VK_FORMAT_R32G32_SFLOAT,
+                .offset   = offsetof(Vertex, color),
+            },
+        };
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{
             .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .pNext                           = nullptr,
             .flags                           = 0,
-            .vertexBindingDescriptionCount   = 0,
-            .pVertexBindingDescriptions      = nullptr,
-            .vertexAttributeDescriptionCount = 0,
-            .pVertexAttributeDescriptions    = nullptr,
+            .vertexBindingDescriptionCount   = 1,
+            .pVertexBindingDescriptions      = &vertexBindingDescription,
+            .vertexAttributeDescriptionCount = 2,
+            .pVertexAttributeDescriptions    = vertexAttributeDescriptions.data(),
         };
 
         /* 输入装配
@@ -1362,7 +1397,10 @@ private:
             firstVertex：用于定义着色器变量gl_VertexIndex的值。
             firstInstance：用于定义着色器变量gl_InstanceIndex的值。
         */
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        std::array<VkBuffer, 1>     vertexBuffers = {vertexBuffer};
+        std::array<VkDeviceSize, 1> offsets       = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers.data(), offsets.data());
+        vkCmdDraw(commandBuffer, vertices.size(), 1, 0, 0);
 
         // 结束渲染流程，并提交指令
         vkCmdEndRenderPass(commandBuffer);
@@ -1400,18 +1438,40 @@ private:
         和信号量不同，等待栅栏发出信号后，需要调用vkResetFences函数手动将fence重置为未发出信号的状态。
         */
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, std::numeric_limits<uint64_t>::max());
-        vkResetFences(device, 1, &inFlightFences[currentFrame]);
+        /* 不再此出重置fence
+        假如重置fence后，重建了交换链，那么在下一个循环中vkWaitForFences()函数永远等不到singled的fence
+        */
 
         // 从交换链获取图像
         uint32_t imageIndex = 0;
-        vkAcquireNextImageKHR(device, swapChain, std::numeric_limits<uint64_t>::max(),
-                              imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult result     = vkAcquireNextImageKHR(device, swapChain, std::numeric_limits<uint64_t>::max(),
+                                                    imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        /* 检查交换链是否需要重建
+            VK_ERROR_OUT_OF_DATE_KHR：交换链不能继续使用。通常发生在窗口大小改变后。
+            VK_SUBOPTIMAL_KHR：交换链仍然可以使用，但表面属性已经不能准确匹配。
+        */
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized)
+        {
+            framebufferResized = false;
+            recreateSwapChain();
+            return;
+        }
+        else if (result != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to acquire swap chain image!";
+            throw std::runtime_error("failed to acquire swap chain image!");
+        }
 
-        //
+        // 渲染指令
         vkResetCommandBuffer(commandBuffers[imageIndex], /*VkCommandBufferResetFlagBits*/ 0);
         recordCommandBuffer(commandBuffers[imageIndex], imageIndex);
 
         // 提交指令
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
+        /*
+        如果在获取交换链不可继续使用后，立即跳出这一帧的渲染，会导致我们使用的栅栏
+        (fence)处于我们不能确定得状态。所以，我们应该在重建交换链时，重置栅栏(fence)对象
+        */
         std::array<VkSemaphore, 1>          waitSemaphores   = {imageAvailableSemaphores[currentFrame]};
         std::array<VkPipelineStageFlags, 1> waitStages       = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
         std::array<VkSemaphore, 1>          signalSemaphores = {renderFinishedSemaphores[currentFrame]};
@@ -1450,7 +1510,13 @@ private:
             .pImageIndices      = &imageIndex,
             .pResults           = nullptr,
         };
-        vkQueuePresentKHR(presentQueue, &presentInfo);
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) { recreateSwapChain(); }
+        else if (result != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to present swap chain image!";
+            throw std::runtime_error("failed to present swap chain image!");
+        }
         /*
         我们可以通过pResults成员变量获取每个交换链的呈现操作是否成功的信息。
         在这里，由于我们只使用了一个交换链，可以直接使用呈现函数的返回值来
@@ -1507,10 +1573,7 @@ private:
     void cleanupSwapChain()
     {
         // 清除帧缓冲对象
-        for (auto* framebuffer : swapChainFramebuffers)
-        {
-            vkDestroyFramebuffer(device, framebuffer, nullptr);
-        }
+        for (auto& framebuffer : swapChainFramebuffers) { vkDestroyFramebuffer(device, framebuffer, nullptr); }
 
         /*
         对于指令池对象，我们不需要重建，
@@ -1522,15 +1585,20 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
         // 清除图像视图
-        for (auto* imageView : swapChainImageViews)
-        {
-            vkDestroyImageView(device, imageView, nullptr);
-        }
+        for (auto& imageView : swapChainImageViews) { vkDestroyImageView(device, imageView, nullptr); }
         vkDestroySwapchainKHR(device, swapChain, nullptr);
     }
 
     void recreateSwapChain()
     {
+        int width  = 0;
+        int height = 0;
+        while (width == 0 || height == 0)
+        {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+
         vkDeviceWaitIdle(device);
 
         cleanupSwapChain();
@@ -1548,8 +1616,107 @@ private:
         体的oldSwapChain成员变量引用原来的交换链即可。之后，在旧的交换链结束使用时就可
         以清除它。
         */
+    }
 
-        // TODO - 重建交换链
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+    {
+        auto* app               = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
+
+    void createVertexBuffer()
+    {
+        VkBufferCreateInfo bufferInfo{
+            .sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .size                  = sizeof(vertices[0]) * vertices.size(),
+            .usage                 = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices   = nullptr,
+        };
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to create vertex buffer!";
+            throw std::runtime_error("failed to create vertex buffer!");
+        }
+
+        // 分配缓冲内存前，我们需要获取缓冲的内存需求
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements);
+        // 分配
+        VkMemoryAllocateInfo allocInfo{
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext           = nullptr,
+            .allocationSize  = memRequirements.size,
+            .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+        };
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS)
+        {
+            LOG(ERROR) << "failed to allocate vertex buffer memory!";
+            throw std::runtime_error("failed to allocate vertex buffer memory!");
+        };
+        /* 把申请到的GPU内存绑定到缓冲对象上
+        第四个参数是偏移值。这里我们将内存用作顶点缓冲，可以将其设置为0。
+        偏移值需要满足能够被memRequirements.alignment整除。
+        */
+        vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+
+        // 将顶点数据复制到缓冲中
+        void* data = nullptr;
+        vkMapMemory(device, vertexBufferMemory, 0, bufferInfo.size, 0, &data);
+        memcpy(data, vertices.data(), static_cast<size_t>(bufferInfo.size));
+        vkUnmapMemory(device, vertexBufferMemory);
+        /*
+        现在可以使用memcpy将顶点数据复制到映射后的内存，然后调用vkUnmapMemory函数来
+        结束内存映射。然而，驱动程序可能并不会立即复制数据到缓冲关联的内存中去，这是由于
+        现代处理器都存在缓存这一设计，写入内存的数据并不一定在多个核心同时可见，有下面两
+        种方法可以保证数据被立即复制到缓冲关联的内存中去：
+
+        （处理器在读取或写入数据时，通常会首先访问Cache，而不是直接访问较慢的主内存。
+        由于每个处理器核心可能都有自己的Cache，当一个核心写入数据到它的Cache时，其他核心
+        并不一定能立即看到这些变化，因为它们访问的可能是自己的Cache，而不是共享的主内存。
+        因此，写入内存的数据并不一定在多个核心同时可见。这种现象被称为缓存一致性问题。）
+
+            1. 使用带有VK_MEMORY_PROPERTY_HOST_COHERENT_BIT属性的内存类型，
+            保证内存可见的一致性
+
+            2. 当你写入数据到映射的内存后，调用vkFlushMappedMemoryRanges函数可以手动
+            将缓存中的数据刷新到设备内存中。类似地，在读取映射的内存数据前，调用vkInvalid
+            ateMappedMemoryRanges函数可以确保读取到最新的数据。这种方法需要手动控制
+            缓存的刷新和无效化，但可以在某些情况下提供更好的性能。
+        */
+    }
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+    {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+        /*
+        函数返回的VkPhysicalDeviceMemoryProperties结构体包含了memoryTypes和memoryHeaps
+        两个数组成员变量。memoryHeaps数组成员变量中的每个元素是一种内存来源，比如显存以及
+        显存用尽后的位于主内存种的交换空间
+        */
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+        {
+            if (((typeFilter & (1 << i)) != 0U) &&
+                (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+            {
+                return i;
+            }
+            /*
+            我们需要位域满足VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT(用于从CPU写入数据)
+            和VK_MEMORY_PROPERTY_HOST_COHERENT_BIT(后面介绍原因)的内存类型。
+
+            由于我们不只一个需要的内存属性，所以仅仅检测位与运算的结果是否非0是不够的，
+            还需要检测它是否与我们需要的属性的位域完全相同。
+            */
+        }
+        LOG(ERROR) << "failed to find suitable memory type!";
+        throw std::runtime_error("failed to find suitable memory type!");
     }
 };
 
