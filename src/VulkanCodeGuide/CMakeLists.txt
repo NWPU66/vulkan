@@ -12,6 +12,7 @@ add_executable(hello_triangle
     # ${HEADER}
     hello_triangle.cpp)
 target_include_directories(hello_triangle PRIVATE
+    ${Stb_INCLUDE_DIR}
     ${VCPKG_INCLUDE_DIR}
     ${SRC_DIR})
 target_link_libraries(hello_triangle PRIVATE 
@@ -30,6 +31,10 @@ add_custom_command(TARGET hello_triangle POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/shader"
     $<TARGET_FILE_DIR:hello_triangle>/shader)
+add_custom_command(TARGET hello_triangle POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/texture"
+    $<TARGET_FILE_DIR:hello_triangle>/texture)
 install(TARGETS hello_triangle 
     RUNTIME DESTINATION ./demo
     LIBRARY DESTINATION ./demo
